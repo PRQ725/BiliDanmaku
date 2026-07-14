@@ -10,9 +10,46 @@ import sys
 import json
 import struct
 import traceback
+import os
+from datetime import datetime
 
 # Message size limit: 1 MB (Chrome Native Messaging standard)
 MAX_MESSAGE_BYTES = 1024 * 1024
+
+# Log file path — always relative to this script, not CWD
+# (Chrome launches native host with unpredictable working directory)
+_LOG_DIR = os.path.dirname(os.path.abspath(__file__))
+_LOG_FILE = os.path.join(_LOG_DIR, 'native_host.log')
+
+
+class TeeStderr:
+    """Writes to both the original stderr (terminal) and a log file.
+
+    Chrome launches native_host.py as a child process without a console,
+    so stderr is discarded. This tee ensures all logs are captured in
+    a file regardless of how the process is launched.
+    """
+    def __init__(self, file_path):
+        self._stderr = sys.__stderr__  # keep reference to real stderr
+        self._file = open(file_path, 'a', encoding='utf-8')
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        self._file.write(f'\n{"=" * 60}\n')
+        self._file.write(f'===  Session started at {timestamp}\n')
+        self._file.write(f'{"=" * 60}\n')
+        self._file.flush()
+
+    def write(self, data):
+        self._stderr.write(data)
+        self._stderr.flush()
+        self._file.write(data)
+        self._file.flush()
+
+    def flush(self):
+        self._stderr.flush()
+        self._file.flush()
+
+    def close(self):
+        self._file.close()
 
 
 def read_message():
@@ -101,6 +138,11 @@ def handle_message(msg):
 
 
 def main():
+    # Redirect stderr to both terminal and log file.
+    # This ensures Chrome-launched instances (no console) still produce
+    # readable logs for debugging.
+    sys.stderr = TeeStderr(_LOG_FILE)
+
     print('[BiliDanmaku] ========================================', file=sys.stderr)
     print('[BiliDanmaku] Native Host 已启动 (MVP v0.1)', file=sys.stderr)
     print('[BiliDanmaku] 等待浏览器扩展连接...', file=sys.stderr)

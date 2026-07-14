@@ -1,0 +1,13 @@
+# Python runtime artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.log
+
+# IDE / editor
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,14 @@
+# 默认所有文本文件使用 LF
+* text=auto eol=lf
+
+# 明确指定代码和文档文件
+*.py   text eol=lf
+*.js   text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.xml  text eol=lf
+*.ned  text eol=lf
+
+# Windows脚本保持CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf

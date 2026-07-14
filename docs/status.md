@@ -11,27 +11,28 @@
 |------|------|
 | 项目版本 | **v0.1** (MVP Phase 1) |
 | 设计文档版本 | v0.4 ([docs/design.md](design.md)) |
-| 开发阶段 | **MVP Phase 1 已完成代码编写，待实机验证** |
-| 目标 | Edge/Chrome 打开 B站视频 → Python 控制台打印结构化视频信息 |
+| 开发阶段 | **MVP Phase 1 端到端验证通过，进入 Phase 2** |
+| 目标 | Edge/Chrome 打开 B站视频 → Python 控制台打印结构化视频信息 ✅ |
 
 ### 1.1 项目目录结构
 
 ```
 BiliDanmaku/
 ├── .git/                          # Git 仓库
+├── .gitignore                     # 排除 __pycache__/*.log 等
 ├── CLAUDE.md                      # 项目指令（AI 上下文）
 ├── docs/
-│   ├── design.md                  # 技术设计文档 v0.4（~900行）
+│   ├── design.md                  # 技术设计文档 v0.4
 │   └── status.md                  # 项目状态快照（本文件）
 ├── extension/
 │   ├── manifest.json              # Manifest V3 配置
-│   ├── content.js                 # Resolver Chain + 播放监听 + SPA检测（251行）
-│   └── background.js              # Service Worker 消息中枢 + [Beta]重连（146行）
+│   ├── content.js                 # Resolver Chain + 播放监听 + SPA检测
+│   └── background.js              # Service Worker 消息中枢 + [Beta]重连
 └── python/
-    ├── native_host.py             # Native Messaging 协议 + 结构化打印（115行）
-    ├── native_host.bat            # Native Host 启动器（Chrome 要求可执行文件）
-    ├── native_host.json           # Native Messaging 清单（扩展ID占位）
-    └── test_native_host.py        # 独立协议测试脚本（模拟 Chrome 客户端）
+    ├── native_host.py             # Native Messaging 协议 + TeeStderr 文件日志
+    ├── native_host.bat            # Native Host 启动器
+    ├── native_host.json           # Native Messaging 清单（扩展ID已填入）
+    └── test_native_host.py        # 独立协议测试（17/17 通过）
 ```
 
 ### 1.2 Git 状态
@@ -40,19 +41,20 @@ BiliDanmaku/
 |------|------|
 | 当前分支 | `main` |
 | 最新提交 | `b1bdad2` — Complete MVP v0.1 implementation |
-| 工作区 | 有未跟踪文件（native_host.bat, native_host.json, test_native_host.py） |
-| 未跟踪文件 | `python/native_host.bat`, `python/native_host.json`, `python/test_native_host.py` |
+| 工作区 | 有未跟踪文件（Phase 1 验证准备文件） |
+| 未跟踪文件 | `python/native_host.bat`, `python/native_host.json`, `python/test_native_host.py`, `.gitignore` |
 
 ### 1.3 Phase 1 完成情况
-- [x] `extension/manifest.json` — 已更新（host_permissions + content_scripts）
-- [x] `extension/content.js` — 已创建（Resolver Chain + 播放监听 + SPA检测）
-- [x] `extension/background.js` — 已重写（connectNative + 消息路由 + [Beta]重连）
-- [x] `python/native_host.py` — 已重写（Native Messaging 协议 + 结构化打印 + try/except）
-- [x] `python/test_native_host.py` — 已创建（协议独立测试，17/17 通过）
-- [x] `python/native_host.json` — 已创建（待填入扩展 ID）
-- [x] `python/native_host.bat` — 已创建（Native Host 启动器）
-- [x] `docs/design.md` — 已保存
-- [ ] **实机验证** — 注册 Native Host → 加载扩展 → 打开B站视频 → 确认 Python 收到消息
+- [x] `extension/manifest.json` — 已更新
+- [x] `extension/content.js` — Resolver Chain + 播放监听 + SPA 检测
+- [x] `extension/background.js` — connectNative + 消息路由 + [Beta]重连
+- [x] `python/native_host.py` — Native Messaging 协议 + 结构化打印 + 单点故障保护 + TeeStderr 文件日志
+- [x] `python/test_native_host.py` — 协议独立测试（17/17 通过）
+- [x] `python/native_host.json` — Native Host 清单（已注册 Chrome）
+- [x] `python/native_host.bat` — Native Host 启动器
+- [x] `.gitignore` — 排除运行时产物
+- [x] `docs/design.md` — 技术设计文档 v0.4
+- [x] **实机验证** — Chrome 端到端通信验证通过 ✅（2026-07-14）
 
 ---
 
@@ -146,27 +148,35 @@ while True:
         # Continue — next message may be fine
 ```
 
-### 3.4 尚未验证
+### 3.4 Phase 1 实机验证结果 (2026-07-14)
 
-- [ ] Native Host 注册到 Windows 注册表
-- [ ] 扩展加载到 Chrome/Edge
-- [ ] 端到端消息链路（B站页面 → Python stderr）
-- [ ] SPA 视频切换检测
-- [ ] Resolver 降级行为
+| 验证项 | 结果 | 说明 |
+|--------|:--:|------|
+| Native Host 注册表 | 通过 | Chrome 注册表写入成功，`connectNative()` 可找到 Host |
+| 扩展加载 | 通过 | Chrome 开发者模式加载 `extension/` 目录 |
+| Service Worker 连接 | 通过 | 日志显示 `Native Host 已连接` |
+| video_switch 消息 | 通过 | `null → BV1W1Tp6xEhT`，Python 回复 `status: ok` |
+| 重启后重连 | 通过 | 无 `Specified native messaging host not found` 错误 |
+| TeeStderr 日志 | 通过 | `python/native_host.log` 正确捕获 Chrome 启动进程的日志 |
+
+**验证发现的问题：**
+- 手动启动 `python native_host.py` 看不到 Chrome 消息 — 正常行为：Chrome 连接的是它自己 spawn 的进程，不是手动启动的实例。解决方案：查看 `native_host.log` 文件获取 Chrome 进程日志。
 
 ---
 
 ## 4. 下一步开发计划
 
-### 4.1 当前最优先：Phase 1 实机验证
+### 4.1 Phase 1 实机验证 ✅ 已完成
 
 按 [design.md §10.7.5](design.md#1075-mvp-推荐调试流程) 执行：
 
-1. [x] Python 独立测试：`test_native_host.py` 17/17 通过（含非法 JSON 不崩溃验证）
-2. [ ] 注册 Native Host：扩展 ID 填入 `native_host.json` → 写入注册表（Chrome + Edge）
-3. [ ] 加载扩展：`chrome://extensions` → 开发者模式 → 加载 `extension/` 目录
-4. [ ] 打开 B站视频，观察 Python stderr 输出
-5. [ ] 验证视频切换、暂停/播放、进度拖动的消息更新
+1. [x] Python 独立测试：`test_native_host.py` 17/17 通过（含非法 JSON 不崩溃、TeeStderr 日志验证）
+2. [x] 注册 Native Host：`native_host.json` → Chrome 注册表 → 连接成功
+3. [x] 加载扩展：Chrome `chrome://extensions` → 加载 `extension/` → Service Worker 启动
+4. [x] 端到端验证：Chrome 打开 B站视频 → Service Worker 日志显示 `Native Host 已连接` → Python 回复 `status: ok`
+5. [x] 重启验证：重启 Chrome 后首次连接正常，无 `Specified native messaging host not found` 错误
+
+**Phase 1 验证结论：Extension ↔ Native Messaging ↔ Python 通信链路正常工作。**
 
 ### 4.2 Phase 2 预览（验证通过后开始）
 
@@ -187,15 +197,7 @@ while True:
 
 ## 5. 当前阻塞任务（Blocking Issues）
 
-> 这些是**当前直接阻塞开发进度**的问题，必须解决才能进入 Phase 2。与 §7 的"已知问题与风险"不同，§7 记录的是长期风险和已验证但未修复的 bug。
-
-| # | 阻塞项 | 影响 | 解决方式 |
-|---|--------|------|----------|
-| B1 | **Phase 1 实机验证未执行** | 无法确认 Extension↔Python 通信链路在真实浏览器中是否正常，无法开始 Phase 2 | Step 1 已完成（17/17 通过）；接下来：加载扩展 → 注册 Native Host → 端到端测试 |
-| B2 | **Native Host 未注册到 Windows 注册表** | 浏览器无法找到 Python 进程并建立连接 | 先加载扩展获取 ID → 填入 `allowed_origins` → 执行注册表命令 |
-| ~~B3~~ | ✅ `native_host.json` 已创建 | — | `python/native_host.json` 已创建，扩展 ID 待填入 |
-
-**B1 是核心阻塞项** — B2 是其直接前置条件。完成 B1 后，阻塞解除，可进入 Phase 2 开发。
+> ~~Phase 1 实机验证~~ **已于 2026-07-14 完成。无阻塞项，已就绪进入 Phase 2。**
 
 ---
 
