@@ -147,12 +147,15 @@ def run():
         sys.exit(1)
     print(f'[PASS] native_host.py 存在')
 
-    # 启动 native_host.py 子进程
+    # 启动 native_host.py 子进程 (测试模式：跳过真实 HTTP 请求)
+    env = os.environ.copy()
+    env['BILIDANMAKU_TEST_MODE'] = '1'
     proc = subprocess.Popen(
         [sys.executable, NATIVE_HOST],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=env,
     )
     print(f'[PASS] 子进程已启动 (PID={proc.pid})')
 
@@ -161,6 +164,7 @@ def run():
 
     try:
         # ── 测试 1: 发送 FULL video_switch ─────────────────
+        # 测试模式: fetcher 返回预置有效 XML，应成功获取 3 条弹幕
         print(f'\n── 测试 1: 发送 video_switch (FULL resolver) ──')
         proc.stdin.write(pack_message(TEST_VIDEO_SWITCH_FULL))
         proc.stdin.flush()
@@ -169,10 +173,13 @@ def run():
         response = unpack_message(proc.stdout)
         print(f'  收到回复: {json.dumps(response, ensure_ascii=False)}')
         result.check('收到回复消息', response is not None)
-        result.check('回复 status=ok', response and response.get('payload', {}).get('status') == 'ok',
+        result.check('测试模式弹幕获取成功',
+                     response is not None and
+                     response.get('payload', {}).get('status') == 'ok',
                      f'status={response.get("payload", {}).get("status") if response else "None"}')
 
         # ── 测试 2: 发送 PARTIAL video_switch ──────────────
+        # 测试模式: video_info_handler 直接抛异常，预期 status=error
         print(f'\n── 测试 2: 发送 video_switch (PARTIAL resolver, cid=null) ──')
         proc.stdin.write(pack_message(TEST_VIDEO_SWITCH_PARTIAL))
         proc.stdin.flush()
@@ -180,10 +187,14 @@ def run():
 
         response = unpack_message(proc.stdout)
         print(f'  收到回复: {json.dumps(response, ensure_ascii=False)}')
-        result.check('PARTIAL 消息也能正常回复', response is not None)
-        result.check('回复 status=ok', response and response.get('payload', {}).get('status') == 'ok')
+        result.check('PARTIAL 消息收到回复', response is not None)
+        result.check('测试模式 PARTIAL 返回 error',
+                     response is not None and
+                     response.get('payload', {}).get('status') == 'error',
+                     f'status={response.get("payload", {}).get("status") if response else "None"}')
 
         # ── 测试 3: 发送 progress_update (播放中) ──────────
+        # progress_update 不触发 HTTP，保持原有行为
         print(f'\n── 测试 3: 发送 progress_update (播放中) ──')
         proc.stdin.write(pack_message(TEST_PROGRESS_UPDATE))
         proc.stdin.flush()
@@ -216,9 +227,9 @@ def run():
         result.check('非法消息后进程仍存活', still_alive,
                      f'进程退出码={proc.returncode}' if not still_alive else '')
 
-        # 再发一条正常消息确认
+        # 再发一条 progress_update 确认（避免 HTTP 延迟干扰）
         if still_alive:
-            proc.stdin.write(pack_message(TEST_VIDEO_SWITCH_FULL))
+            proc.stdin.write(pack_message(TEST_PROGRESS_UPDATE))
             proc.stdin.flush()
             time.sleep(0.3)
             response = unpack_message(proc.stdout)
@@ -231,10 +242,19 @@ def run():
         # 关闭 stdin，触发 native_host 退出循环
         proc.stdin.close()
 
+        # 排空 stdout 避免管道缓冲区阻塞进程退出
         try:
-            proc.wait(timeout=3)
+            while True:
+                leftover = proc.stdout.read(4096)
+                if not leftover:
+                    break
+        except Exception:
+            pass
+
+        try:
+            proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            print('[WARN] 进程未在 3s 内退出，强制终止')
+            print('[WARN] 进程未在 5s 内退出，强制终止')
             proc.kill()
             proc.wait()
 
@@ -269,9 +289,14 @@ def run():
             'stderr 中未找到 PARTIAL（可能未打印 resolverLevel）'
         )
         result.check(
-            'stderr 包含 cid 为空警告',
-            'cid 为空' in stderr_text,
-            'PARTIAL resolver 时应打印 cid 为空警告'
+            'stderr 包含弹幕获取完成 (v0.2.0-alpha)',
+            '弹幕获取完成' in stderr_text,
+            'stderr 中未找到弹幕获取完成标记'
+        )
+        result.check(
+            'stderr 包含测试弹幕内容',
+            'test-danmaku-1' in stderr_text,
+            'stderr 中未找到测试弹幕内容'
         )
         result.check(
             'stderr 包含播放中状态',

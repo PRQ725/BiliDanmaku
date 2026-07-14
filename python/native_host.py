@@ -13,6 +13,8 @@ import traceback
 import os
 from datetime import datetime
 
+from danmaku_handler import handle_video_switch
+
 # Message size limit: 1 MB (Chrome Native Messaging standard)
 MAX_MESSAGE_BYTES = 1024 * 1024
 
@@ -123,18 +125,51 @@ def handle_message(msg):
 
     print(f'[BiliDanmaku]   Resolver: {resolver_name} (level={resolver_level})', file=sys.stderr)
 
-    # Flag when cid is missing — v0.2+ will handle this via video_info_handler
-    if cid is None:
-        print(f'[BiliDanmaku]   ⚠ cid 为空, v0.2+ 将由 video_info_handler 调用 API 补全', file=sys.stderr)
+    # ── v0.2.0-alpha: video_switch 触发弹幕获取 ──────────────────
+    if msg_type == 'video_switch':
+        result = handle_video_switch(
+            bv=bv,
+            cid=cid,
+            title=str(title),
+            resolver_level=str(resolver_level),
+        )
+        print(result['summary'], file=sys.stderr)
 
-    # Send acknowledgment
-    send_message({
-        'type': 'status',
-        'payload': {
-            'status': 'ok',
-            'message': f'Received {msg_type} for BV={bv}',
-        }
-    })
+        # 回复状态
+        if result['success']:
+            send_message({
+                'type': 'status',
+                'payload': {
+                    'status': 'ok',
+                    'message': f'Danmaku loaded: {result["result"].total if result["result"] else 0} items',
+                }
+            })
+        else:
+            send_message({
+                'type': 'status',
+                'payload': {
+                    'status': 'error',
+                    'message': result.get('error', 'danmaku fetch failed'),
+                }
+            })
+    elif msg_type == 'progress_update':
+        # progress_update 暂不触发业务逻辑 (v0.3+ 同步)
+        send_message({
+            'type': 'status',
+            'payload': {
+                'status': 'ok',
+                'message': f'Received {msg_type} for BV={bv}',
+            }
+        })
+    else:
+        # 未知消息类型 — 仍然回复 ack
+        send_message({
+            'type': 'status',
+            'payload': {
+                'status': 'ok',
+                'message': f'Received {msg_type} for BV={bv}',
+            }
+        })
 
 
 def main():
