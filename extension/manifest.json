@@ -1,0 +1,33 @@
+{
+    "manifest_version": 3,
+
+    "name": "Bili Danmaku Assistant",
+
+    "version": "0.1",
+
+    "description": "Desktop danmaku overlay for Bilibili — auto-detects video and sends info to Python backend.",
+
+    "host_permissions": [
+        "*://www.bilibili.com/*"
+    ],
+
+    "permissions": [
+        "scripting",
+        "nativeMessaging"
+    ],
+
+    "background": {
+        "service_worker": "background.js"
+    },
+
+    "content_scripts": [
+        {
+            "matches": [
+                "*://www.bilibili.com/video/*",
+                "*://www.bilibili.com/bangumi/*"
+            ],
+            "js": ["content.js"],
+            "run_at": "document_idle"
+        }
+    ]
+}
