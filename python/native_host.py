@@ -108,15 +108,17 @@ def main():
 
     msg_count = 0
     while True:
-        msg = read_message()
-        if msg is None:
-            print(f'[BiliDanmaku] 连接断开, 已处理 {msg_count} 条消息, 退出', file=sys.stderr)
-            break
-
-        msg_count += 1
+        msg = None
         try:
+            msg = read_message()
+            if msg is None:
+                print(f'[BiliDanmaku] 连接断开, 已处理 {msg_count} 条消息, 退出', file=sys.stderr)
+                break
+
+            msg_count += 1
             handle_message(msg)
         except Exception as e:
+            msg_count += 1
             print(f'[BiliDanmaku] 消息处理异常 (#{msg_count}): {e}', file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
             # Reply with error status so extension knows something went wrong

@@ -14,11 +14,43 @@
 | 开发阶段 | **MVP Phase 1 已完成代码编写，待实机验证** |
 | 目标 | Edge/Chrome 打开 B站视频 → Python 控制台打印结构化视频信息 |
 
-**Phase 1 完成情况：**
+### 1.1 项目目录结构
+
+```
+BiliDanmaku/
+├── .git/                          # Git 仓库
+├── CLAUDE.md                      # 项目指令（AI 上下文）
+├── docs/
+│   ├── design.md                  # 技术设计文档 v0.4（~900行）
+│   └── status.md                  # 项目状态快照（本文件）
+├── extension/
+│   ├── manifest.json              # Manifest V3 配置
+│   ├── content.js                 # Resolver Chain + 播放监听 + SPA检测（251行）
+│   └── background.js              # Service Worker 消息中枢 + [Beta]重连（146行）
+└── python/
+    ├── native_host.py             # Native Messaging 协议 + 结构化打印（115行）
+    ├── native_host.bat            # Native Host 启动器（Chrome 要求可执行文件）
+    ├── native_host.json           # Native Messaging 清单（扩展ID占位）
+    └── test_native_host.py        # 独立协议测试脚本（模拟 Chrome 客户端）
+```
+
+### 1.2 Git 状态
+
+| 项目 | 状态 |
+|------|------|
+| 当前分支 | `main` |
+| 最新提交 | `b1bdad2` — Complete MVP v0.1 implementation |
+| 工作区 | 有未跟踪文件（native_host.bat, native_host.json, test_native_host.py） |
+| 未跟踪文件 | `python/native_host.bat`, `python/native_host.json`, `python/test_native_host.py` |
+
+### 1.3 Phase 1 完成情况
 - [x] `extension/manifest.json` — 已更新（host_permissions + content_scripts）
 - [x] `extension/content.js` — 已创建（Resolver Chain + 播放监听 + SPA检测）
 - [x] `extension/background.js` — 已重写（connectNative + 消息路由 + [Beta]重连）
 - [x] `python/native_host.py` — 已重写（Native Messaging 协议 + 结构化打印 + try/except）
+- [x] `python/test_native_host.py` — 已创建（协议独立测试，17/17 通过）
+- [x] `python/native_host.json` — 已创建（待填入扩展 ID）
+- [x] `python/native_host.bat` — 已创建（Native Host 启动器）
 - [x] `docs/design.md` — 已保存
 - [ ] **实机验证** — 注册 Native Host → 加载扩展 → 打开B站视频 → 确认 Python 收到消息
 
@@ -84,7 +116,37 @@ MVP v0.1 (当前) → v0.2 (弹幕获取+PyQt) → v0.3 (同步+样式) → v1.0
 | `extension/background.js` | Service Worker 消息中枢 | connectNative + video_switch/progress_update 区分 + 1s限流 + [Beta]指数退避重连 |
 | `python/native_host.py` | Native Messaging 协议入口 | read_message(4字节LE), handle_message(结构化打印), try/except单消息保护, 1MB上限 |
 
-### 3.3 尚未验证
+### 3.3 已修复的 Bug
+
+| Bug | 发现 | 修复 | 验证 |
+|-----|------|------|------|
+| `read_message()` JSON 解析异常导致进程崩溃 | Step 1 测试 5（非法数据）触发 | `main()` 循环中 try/except 扩展覆盖 `read_message()` 调用 | `test_native_host.py` 17/17 通过 |
+
+**详情：** 原代码只对 `handle_message()` 做了 try/except，但 `read_message()` 中的 `json.loads()` 可能抛出 `JSONDecodeError`，该异常未被捕获导致进程退出，违背"单点故障不崩溃"原则。
+
+**修复前：**
+```python
+while True:
+    msg = read_message()           # 异常 → 进程崩溃
+    ...
+    try:
+        handle_message(msg)        # 仅保护了这里
+    except Exception: ...
+```
+
+**修复后：**
+```python
+while True:
+    try:
+        msg = read_message()       # 异常 → 被捕获，进程继续
+        ...
+        handle_message(msg)
+    except Exception as e:
+        ...
+        # Continue — next message may be fine
+```
+
+### 3.4 尚未验证
 
 - [ ] Native Host 注册到 Windows 注册表
 - [ ] 扩展加载到 Chrome/Edge
@@ -100,11 +162,11 @@ MVP v0.1 (当前) → v0.2 (弹幕获取+PyQt) → v0.3 (同步+样式) → v1.0
 
 按 [design.md §10.7.5](design.md#1075-mvp-推荐调试流程) 执行：
 
-1. Python 独立测试：用测试脚本验证 native_host.py 协议正确
-2. 注册 Native Host：编写 `native_host.json`，写入注册表（Chrome + Edge）
-3. 加载扩展：`chrome://extensions` → 开发者模式 → 加载 `extension/` 目录
-4. 打开 B站视频，观察 Python stderr 输出
-5. 验证视频切换、暂停/播放、进度拖动的消息更新
+1. [x] Python 独立测试：`test_native_host.py` 17/17 通过（含非法 JSON 不崩溃验证）
+2. [ ] 注册 Native Host：扩展 ID 填入 `native_host.json` → 写入注册表（Chrome + Edge）
+3. [ ] 加载扩展：`chrome://extensions` → 开发者模式 → 加载 `extension/` 目录
+4. [ ] 打开 B站视频，观察 Python stderr 输出
+5. [ ] 验证视频切换、暂停/播放、进度拖动的消息更新
 
 ### 4.2 Phase 2 预览（验证通过后开始）
 
@@ -123,7 +185,21 @@ MVP v0.1 (当前) → v0.2 (弹幕获取+PyQt) → v0.3 (同步+样式) → v1.0
 
 ---
 
-## 5. 用户约束与偏好
+## 5. 当前阻塞任务（Blocking Issues）
+
+> 这些是**当前直接阻塞开发进度**的问题，必须解决才能进入 Phase 2。与 §7 的"已知问题与风险"不同，§7 记录的是长期风险和已验证但未修复的 bug。
+
+| # | 阻塞项 | 影响 | 解决方式 |
+|---|--------|------|----------|
+| B1 | **Phase 1 实机验证未执行** | 无法确认 Extension↔Python 通信链路在真实浏览器中是否正常，无法开始 Phase 2 | Step 1 已完成（17/17 通过）；接下来：加载扩展 → 注册 Native Host → 端到端测试 |
+| B2 | **Native Host 未注册到 Windows 注册表** | 浏览器无法找到 Python 进程并建立连接 | 先加载扩展获取 ID → 填入 `allowed_origins` → 执行注册表命令 |
+| ~~B3~~ | ✅ `native_host.json` 已创建 | — | `python/native_host.json` 已创建，扩展 ID 待填入 |
+
+**B1 是核心阻塞项** — B2 是其直接前置条件。完成 B1 后，阻塞解除，可进入 Phase 2 开发。
+
+---
+
+## 6. 用户约束与偏好
 
 | 约束 | 来源 | 说明 |
 |------|------|------|
@@ -138,7 +214,7 @@ MVP v0.1 (当前) → v0.2 (弹幕获取+PyQt) → v0.3 (同步+样式) → v1.0
 
 ---
 
-## 6. 已知问题与风险
+## 7. 已知问题与风险
 
 | 问题/风险 | 状态 | 影响 | 应对 |
 |-----------|------|------|------|

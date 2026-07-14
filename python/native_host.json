@@ -1,0 +1,10 @@
+{
+    "name": "com.bili.danmaku",
+    "description": "BiliDanmaku Native Messaging Host — B站弹幕助手后台",
+    "path": "native_host.bat",
+    "type": "stdio",
+    "allowed_origins": [
+        "chrome-extension://__CHROME_EXTENSION_ID__/",
+        "chrome-extension://__EDGE_EXTENSION_ID__/"
+    ]
+}
