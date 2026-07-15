@@ -122,6 +122,7 @@ chrome.runtime.onMessage.addListener((message, sender) => {
             pageUrl: message.pageUrl,
             resolverName: message.resolverName,
             resolverLevel: message.resolverLevel,
+            cookies: message.cookies,
         });
         lastProgressTime = now;
         return;

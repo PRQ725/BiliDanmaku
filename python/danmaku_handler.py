@@ -26,6 +26,7 @@ def handle_video_switch(
     cid: int | None,
     title: str = '',
     resolver_level: str = 'UNKNOWN',
+    cookie: str | None = None,
 ) -> dict:
     """处理视频切换事件，获取弹幕数据。
 
@@ -89,7 +90,7 @@ def handle_video_switch(
 
     # ── Step 2-3: 获取 + 解析弹幕 ──────────────────────────────
     try:
-        raw_xml = fetch_danmaku_raw(cid)
+        raw_xml = fetch_danmaku_raw(cid, cookie=cookie)
         parse_result = parse_xml(raw_xml)
     except Exception as e:
         traceback.print_exc(file=sys.stderr)

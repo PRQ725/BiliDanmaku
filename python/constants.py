@@ -31,6 +31,8 @@ HTTP_HEADERS = {
         'Chrome/131.0.0.0 Safari/537.36'
     ),
     'Referer': 'https://www.bilibili.com/',
+    'Origin': 'https://www.bilibili.com',
+    'Accept': 'application/xml, text/xml, */*',
 }
 
 TIMEOUTS = {

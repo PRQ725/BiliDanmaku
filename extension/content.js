@@ -34,7 +34,7 @@ class UrlRegexResolver {
         return {
             bv: match[1],
             cid: null,
-            title: document.title,
+            title: document.title || null,
             duration: null,
         };
     }
@@ -54,7 +54,7 @@ class MetaTagResolver {
         return {
             bv: match[0],
             cid: null,
-            title: document.title,
+            title: document.title || null,
             duration: null,
         };
     }
@@ -81,7 +81,7 @@ class VideoElementResolver {
         return {
             bv: bv,
             cid: null,
-            title: document.title,
+            title: document.title || null,
             duration: video ? video.duration || null : null,
         };
     }
@@ -98,15 +98,45 @@ class VideoInfoResolverChain {
         ];
     }
 
+    /** Extract BV from current URL for cross-validation. */
+    _getBvFromUrl() {
+        const match = location.href.match(/\/video\/(BV[a-zA-Z0-9]+)/);
+        return match ? match[1] : null;
+    }
+
     resolve() {
+        const urlBv = this._getBvFromUrl();
+        console.log(LOG_PREFIX, `Resolver Chain 启动 (URL BV=${urlBv || '?'})`);
+
         for (const resolver of this.resolvers) {
             try {
                 const result = resolver.resolve();
                 if (result && result.bv) {
+                    // ── Cross-validate against URL BV ─────────────────
+                    // During SPA navigation, __INITIAL_STATE__ may still hold
+                    // the previous video's data. If the resolver returned a BV
+                    // that differs from the URL, the data is stale → skip.
+                    if (urlBv && result.bv !== urlBv) {
+                        console.warn(
+                            LOG_PREFIX,
+                            `Resolver ${resolver.name}: BV 不匹配 URL ` +
+                            `(resolver=${result.bv}, url=${urlBv})，数据过时，跳过`
+                        );
+                        continue;
+                    }
+
+                    // ── Log result ─────────────────────────────────────
                     console.log(
                         LOG_PREFIX,
-                        `Resolver: ${resolver.name} ✓ (level=${resolver.level}, cid=${result.cid ?? 'null'})`
+                        `Resolver: ${resolver.name} ✓ ` +
+                        `(level=${resolver.level}, cid=${result.cid ?? 'null'})`
                     );
+                    console.log(
+                        LOG_PREFIX,
+                        `  提取结果: bv=${result.bv}, title=${result.title || '(null)'}, ` +
+                        `duration=${result.duration ?? 'null'}`
+                    );
+
                     result._resolver = resolver.name;
                     result._level = resolver.level;
                     return result;
@@ -125,7 +155,7 @@ class VideoInfoResolverChain {
 // ═══════════════════════════════════════════════════════════
 
 class PlaybackMonitor {
-    constructor(videoInfo, onUpdate) {
+    constructor(videoInfo, onRequestRetry) {
         this.bv = videoInfo.bv;
         this.cid = videoInfo.cid;
         this.title = videoInfo.title;
@@ -133,10 +163,11 @@ class PlaybackMonitor {
         this.pageUrl = location.href;
         this.resolverName = videoInfo._resolver || 'unknown';
         this.resolverLevel = videoInfo._level || 'unknown';
-        this.onUpdate = onUpdate;
+        this.onUpdate = null; // set by startExtraction
+        this.onRequestRetry = onRequestRetry; // callback to request data refresh
         this.videoElement = null;
         this.pollTimer = null;
-        this.lastSentBv = null; // to track video_switch vs progress_update
+        this.lastSentBv = null;
 
         this._findVideo();
         this._start();
@@ -163,24 +194,48 @@ class PlaybackMonitor {
         this.pollTimer = setInterval(() => this._sendUpdate(), 1000);
     }
 
+    /** Update monitor data after a delayed re-resolution (SPA retry). */
+    updateVideoInfo(videoInfo) {
+        const oldTitle = this.title;
+        this.bv = videoInfo.bv;
+        this.cid = videoInfo.cid;
+        this.title = videoInfo.title;
+        this.duration = videoInfo.duration;
+        this.resolverName = videoInfo._resolver || this.resolverName;
+        this.resolverLevel = videoInfo._level || this.resolverLevel;
+        console.log(
+            LOG_PREFIX,
+            `Monitor 数据刷新: title="${oldTitle}" → "${this.title}", ` +
+            `resolver=${this.resolverName} (${this.resolverLevel})`
+        );
+        this._sendVideoSwitch(); // notify Python of updated data
+    }
+
     _sendVideoSwitch() {
         const msg = {
             type: 'video_info',
             bv: this.bv,
             cid: this.cid,
-            title: this.title,
+            title: this.title || '',
             progress: this.videoElement ? this.videoElement.currentTime : 0,
             duration: this.videoElement ? this.videoElement.duration || this.duration : this.duration,
             isPlaying: this.videoElement ? !this.videoElement.paused : false,
             pageUrl: this.pageUrl,
             resolverName: this.resolverName,
             resolverLevel: this.resolverLevel,
+            cookies: document.cookie, // pass B站 cookies for API requests
         };
         this.lastSentBv = this.bv;
-        console.log(LOG_PREFIX, '发送 video_switch:', msg.bv, msg.title);
+        console.log(LOG_PREFIX, `发送 video_switch: bv=${msg.bv}, title="${msg.title}", cookies=${document.cookie ? document.cookie.length + ' chars' : '(none)'}`);
         chrome.runtime.sendMessage(msg).catch(() => {
             // Extension context may not be ready; retry on next poll
         });
+
+        // Schedule retry if PARTIAL (may have stale title from document.title)
+        if (this.resolverLevel === 'PARTIAL' && this.onRequestRetry) {
+            console.log(LOG_PREFIX, 'PARTIAL resolver, 3s后重试获取完整数据...');
+            setTimeout(() => this.onRequestRetry(this), 3000);
+        }
     }
 
     _sendUpdate() {
@@ -195,16 +250,17 @@ class PlaybackMonitor {
             type: 'video_info',
             bv: this.bv,
             cid: this.cid,
-            title: this.title,
+            title: this.title || '',
             progress: progress,
             duration: this.videoElement.duration || this.duration,
             isPlaying: isPlaying,
             pageUrl: this.pageUrl,
             resolverName: this.resolverName,
             resolverLevel: this.resolverLevel,
+            cookies: document.cookie,
         };
 
-        // Check if BV changed (video switch)
+        // Check if BV changed (video switch detected during poll)
         if (this.lastSentBv && this.lastSentBv !== this.bv) {
             console.log(LOG_PREFIX, '检测到视频切换: ', this.lastSentBv, '→', this.bv);
             this.lastSentBv = this.bv;
@@ -263,32 +319,69 @@ class SpaNavigator {
 
 let currentMonitor = null;
 let currentNavigator = null;
+let retryTimer = null; // for delayed PARTIAL re-resolution
 
-function startExtraction() {
+/**
+ * Try to re-resolve video info to improve data quality.
+ * Used when initial resolution was PARTIAL (stale title risk).
+ * If a better resolver (FULL) succeeds, update the monitor in place.
+ */
+function attemptDataRefresh(monitor) {
+    // Only retry if this monitor is still the current one
+    if (monitor !== currentMonitor) return;
+
     const chain = new VideoInfoResolverChain();
     const videoInfo = chain.resolve();
+    if (!videoInfo) return;
 
-    if (!videoInfo) {
-        console.error(LOG_PREFIX, '无法提取视频信息, 2s后重试');
-        setTimeout(startExtraction, 2000);
-        return;
+    // Only update if we got better data than before
+    if (videoInfo._level === 'FULL' || (videoInfo.title && videoInfo.title !== monitor.title)) {
+        console.log(LOG_PREFIX, `重试解析获得更好数据 (level=${videoInfo._level})，更新 monitor`);
+        monitor.updateVideoInfo(videoInfo);
     }
+}
 
-    // Destroy previous monitor if exists (SPA switch)
-    if (currentMonitor) {
-        currentMonitor.destroy();
-        currentMonitor = null;
+function startExtraction(delayMs) {
+    const run = () => {
+        const chain = new VideoInfoResolverChain();
+        const videoInfo = chain.resolve();
+
+        if (!videoInfo) {
+            console.error(LOG_PREFIX, '无法提取视频信息, 2s后重试');
+            setTimeout(startExtraction, 2000);
+            return;
+        }
+
+        // Destroy previous monitor if exists (SPA switch)
+        if (currentMonitor) {
+            currentMonitor.destroy();
+            currentMonitor = null;
+        }
+
+        // Clear any pending retry timer
+        if (retryTimer) {
+            clearTimeout(retryTimer);
+            retryTimer = null;
+        }
+
+        currentMonitor = new PlaybackMonitor(videoInfo, attemptDataRefresh);
+    };
+
+    if (delayMs && delayMs > 0) {
+        console.log(LOG_PREFIX, `SPA 导航后延迟 ${delayMs}ms 再解析 (等待页面更新)...`);
+        setTimeout(run, delayMs);
+    } else {
+        run();
     }
-
-    currentMonitor = new PlaybackMonitor(videoInfo);
 }
 
 // Bootstrap
 console.log(LOG_PREFIX, 'Content Script 已加载, URL:', location.href);
 startExtraction();
 
-// SPA navigation watcher
+// SPA navigation watcher — uses 1s delay to let B站 framework update
+// __INITIAL_STATE__ and document.title before we resolve.
 currentNavigator = new SpaNavigator(() => {
-    console.log(LOG_PREFIX, 'SPA 导航, 重新提取视频信息');
-    startExtraction();
+    console.log(LOG_PREFIX, 'SPA 导航, 重新提取视频信息 (1s延迟)');
+    startExtraction(1000);
 });

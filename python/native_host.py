@@ -127,11 +127,13 @@ def handle_message(msg):
 
     # ── v0.2.0-alpha: video_switch 触发弹幕获取 ──────────────────
     if msg_type == 'video_switch':
+        cookie = payload.get('cookies', None)
         result = handle_video_switch(
             bv=bv,
             cid=cid,
             title=str(title),
             resolver_level=str(resolver_level),
+            cookie=cookie if cookie else None,
         )
         print(result['summary'], file=sys.stderr)
 
