@@ -112,6 +112,24 @@ class TransparentOverlay(QWidget):
         if sys.platform == 'win32' and not self._mouse_passthrough_enabled:
             self._enable_mouse_passthrough()
 
+    def paintEvent(self, event) -> None:
+        """绘制事件 — 委托给外部渲染回调。
+
+        由 window.update() 或 Qt 重绘机制触发。
+        若已通过 set_renderer() 设置渲染回调，则在此调用它完成
+        弹幕绘制。若未设置回调，本方法仅执行父类默认绘制（透明清屏）。
+
+        Args:
+            event: QPaintEvent 实例。
+        """
+        super().paintEvent(event)
+        if self._render_callback is not None:
+            painter = QPainter(self)
+            try:
+                self._render_callback(painter, self.rect())
+            finally:
+                painter.end()  # safe: QPainter() succeeded to reach here
+
     # ── 公开接口 ───────────────────────────────────────────────
 
     def refresh_geometry(self) -> None:

@@ -46,9 +46,10 @@ def handle_video_switch(
         dict:
             {
                 'success': bool,
-                'summary': str,           # 人类可读摘要，可直接 print
+                'summary': str,                    # 人类可读摘要，可直接 print
                 'result': DanmakuParseResult | None,
                 'error': str | None,
+                'cid': int | None,                 # 最终 cid（来自 Resolver 或补全）
             }
     """
     lines: List[str] = []
@@ -80,6 +81,7 @@ def handle_video_switch(
                 'summary': '\n'.join(lines),
                 'result': None,
                 'error': str(e),
+                'cid': None,
             }
     else:
         lines.append(f'[BiliDanmaku] ─── 弹幕获取 (FULL) ───')
@@ -100,6 +102,7 @@ def handle_video_switch(
             'summary': '\n'.join(lines),
             'result': None,
             'error': str(e),
+            'cid': cid,
         }
 
     # ── Step 4: 生成摘要 ──────────────────────────────────────
@@ -136,4 +139,5 @@ def handle_video_switch(
         'summary': '\n'.join(lines),
         'result': parse_result,
         'error': None,
+        'cid': cid,
     }

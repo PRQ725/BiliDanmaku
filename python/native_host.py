@@ -1,19 +1,34 @@
 #!/usr/bin/env python3
-# native_host.py — BiliDanmaku Native Messaging Host (MVP v0.1)
-# Receives structured video info from browser extension via stdin,
-# prints it to stderr for verification, and replies "ok" via stdout.
+# native_host.py — BiliDanmaku Native Messaging Host
+# Step 3: QApplication entry point + stdin background thread + dispatcher integration
+#
+# Architecture (v0.2.x):
+#   Main Thread (Qt GUI):  QApplication + overlay modules + DanmakuIntegration
+#   Background Thread:     stdin read loop → dispatcher.publish()
 #
 # Protocol: Chrome Native Messaging (4-byte LE length prefix + JSON)
-# Dependencies: Python 3.8+ standard library only
+# Dependencies: Python 3.10+, PyQt6, requests
 
 import sys
 import json
 import struct
+import time
+import threading
 import traceback
 import os
 from datetime import datetime
+from typing import Optional
+
+from PyQt6.QtCore import pyqtSignal, QObject
+from PyQt6.QtWidgets import QApplication
 
 from danmaku_handler import handle_video_switch
+from data_dispatcher import dispatcher
+from events import EventType, DanmakuLoadedEvent, ProgressUpdatedEvent
+from overlay.main_window import TransparentOverlay
+from overlay.tray_icon import TrayIcon
+from overlay.danmaku_queue import DanmakuQueue
+from overlay.danmaku_renderer import DanmakuRenderer
 
 # Message size limit: 1 MB (Chrome Native Messaging standard)
 MAX_MESSAGE_BYTES = 1024 * 1024
@@ -80,6 +95,9 @@ def send_message(msg):
     """
     Send a Native Messaging message to stdout.
     msg should be a JSON-serializable dict.
+
+    IMPORTANT: Only call from the stdin reader thread.
+    stdout is the Native Messaging channel — never write non-protocol data.
     """
     data = json.dumps(msg, ensure_ascii=False).encode('utf-8')
     sys.stdout.buffer.write(struct.pack('<I', len(data)))
@@ -87,10 +105,236 @@ def send_message(msg):
     sys.stdout.buffer.flush()
 
 
-def handle_message(msg):
+# ── DanmakuIntegration ────────────────────────────────────────────
+
+
+class DanmakuIntegration(QObject):
+    """Coordinates overlay modules via dispatcher events.
+
+    Lives in the Qt GUI thread. Bridges the dispatcher event bus
+    (published from background stdin thread) to the overlay rendering
+    pipeline (Qt GUI thread).
+
+    Lifecycle:
+        - Subscribes to DANMAKU_LOADED and PROGRESS_UPDATED on init.
+        - Connects renderer.frame_rendered → _on_frame for tick→enqueue.
+        - quit_requested signal bridges background thread → QApplication.quit().
+
+    Thread safety:
+        - _on_danmaku_loaded: called from background thread (dispatcher sync callback).
+          queue.load() is thread-safe (DanmakuQueue uses internal lock).
+        - _on_frame: called from GUI thread (renderer.frame_rendered signal).
+          All Qt widget access happens here.
     """
-    Process a single message from the extension.
-    MVP: print structured video info to stderr for verification.
+
+    quit_requested = pyqtSignal()
+    """Emitted from background thread to request Qt event loop exit."""
+
+    def __init__(
+        self,
+        queue: DanmakuQueue,
+        renderer: DanmakuRenderer,
+        window: TransparentOverlay,
+        tray: TrayIcon,
+        parent: QObject | None = None,
+    ) -> None:
+        """Initialize integration coordinator.
+
+        Args:
+            queue: DanmakuQueue instance (thread-safe).
+            renderer: DanmakuRenderer instance (GUI thread only).
+            window: TransparentOverlay instance.
+            tray: TrayIcon instance.
+            parent: Parent QObject.
+        """
+        super().__init__(parent)
+
+        self._queue = queue
+        self._renderer = renderer
+        self._window = window
+        self._tray = tray
+        self._wall_clock_start: Optional[float] = None
+
+        # ── Video switch coordination ────────────────────────────
+        # _on_danmaku_loaded runs in background thread and must NOT
+        # call renderer.clear() directly. Instead it sets a flag;
+        # _on_frame (GUI thread) checks it and clears safely.
+        self._pending_clear: bool = False
+
+        # ── Frame pipeline ──────────────────────────────────────
+        # After renderer updates positions + removes OOB each frame,
+        # we inject new danmaku from queue and trigger repaint.
+        renderer.frame_rendered.connect(self._on_frame)
+
+        # ── Dispatcher subscriptions ─────────────────────────────
+        # These callbacks run in the publisher's thread (stdin thread).
+        # queue.load() is thread-safe; renderer/widget access must
+        # only happen via _on_frame (GUI thread).
+        dispatcher.subscribe(EventType.DANMAKU_LOADED, self._on_danmaku_loaded)
+        dispatcher.subscribe(EventType.PROGRESS_UPDATED, self._on_progress_updated)
+
+    # ── Dispatcher callbacks (called from background thread) ──────
+
+    def _on_danmaku_loaded(self, event: DanmakuLoadedEvent) -> None:
+        """Handle DANMAKU_LOADED: load items into queue, reset wall clock.
+
+        Called synchronously from dispatcher.publish() in the stdin thread.
+        queue.load() is thread-safe. renderer.clear() is deferred to
+        _on_frame (GUI thread) via _pending_clear flag.
+        """
+        if event.success:
+            # Defer renderer clear to GUI thread — must NOT call
+            # renderer.clear() here (cross-thread Qt access).
+            self._pending_clear = True
+            self._queue.load(event.items)
+            self._wall_clock_start = time.monotonic()
+
+    def _on_progress_updated(self, event: ProgressUpdatedEvent) -> None:
+        """Handle PROGRESS_UPDATED: v0.2 no-op.
+
+        Reserved for v0.3+ playback sync integration.
+        """
+        pass
+
+    # ── Frame callback (called from GUI thread) ──────────────────
+
+    def _on_frame(self) -> None:
+        """Inject new danmaku from queue into renderer each frame.
+
+        Called from renderer.frame_rendered signal (GUI thread).
+        Safe to access all Qt objects.
+        """
+        # Handle deferred renderer clear (set by _on_danmaku_loaded
+        # in background thread on video switch).
+        if self._pending_clear:
+            self._renderer.clear()
+            self._pending_clear = False
+
+        if self._wall_clock_start is None:
+            return
+
+        elapsed = time.monotonic() - self._wall_clock_start
+        new_items = self._queue.tick(elapsed)
+        if new_items:
+            self._renderer.enqueue(new_items)
+
+        # Trigger repaint — paintEvent calls renderer.render()
+        self._window.update()
+
+
+# ── Message Handlers (called from background thread) ──────────────
+
+
+def _handle_video_switch_message(payload: dict) -> None:
+    """Process a video_switch message from the extension.
+
+    1. Call danmaku_handler to fetch and parse danmaku (HTTP in background).
+    2. Print summary to stderr.
+    3. Publish DanmakuLoadedEvent via dispatcher.
+    4. Reply to extension via stdout.
+
+    Args:
+        payload: The message payload dict from the extension.
+    """
+    bv = payload.get('bv', '')
+    cid = payload.get('cid')
+    title = payload.get('title', '')
+    resolver_level = payload.get('resolverLevel', 'UNKNOWN')
+    cookie = payload.get('cookies', None)
+
+    result = handle_video_switch(
+        bv=bv,
+        cid=cid,
+        title=str(title),
+        resolver_level=str(resolver_level),
+        cookie=cookie if cookie else None,
+    )
+
+    # Log summary
+    print(result['summary'], file=sys.stderr)
+
+    # Publish event to dispatcher
+    parse_result = result.get('result')
+    final_cid = result.get('cid') or 0
+
+    if result['success'] and parse_result is not None:
+        event = DanmakuLoadedEvent(
+            bv=bv,
+            cid=final_cid,
+            title=str(title),
+            success=True,
+            items=parse_result.items,
+            total=parse_result.total,
+            summary=result['summary'],
+        )
+    else:
+        event = DanmakuLoadedEvent(
+            bv=bv,
+            cid=final_cid,
+            title=str(title),
+            success=False,
+            error=result.get('error', 'unknown'),
+            summary=result['summary'],
+        )
+
+    dispatcher.publish(event)
+
+    # Reply via stdout (Native Messaging protocol)
+    if result['success']:
+        send_message({
+            'type': 'status',
+            'payload': {
+                'status': 'ok',
+                'message': f'Danmaku loaded: {parse_result.total if parse_result else 0} items',
+            }
+        })
+    else:
+        send_message({
+            'type': 'status',
+            'payload': {
+                'status': 'error',
+                'message': result.get('error', 'danmaku fetch failed'),
+            }
+        })
+
+
+def _handle_progress_update_message(payload: dict) -> None:
+    """Process a progress_update message from the extension.
+
+    Publishes ProgressUpdatedEvent via dispatcher (v0.2 no-op for consumers,
+    but event is published for v0.3+ readiness).
+
+    Args:
+        payload: The message payload dict from the extension.
+    """
+    bv = payload.get('bv', '')
+    progress = payload.get('progress', 0)
+    is_playing = payload.get('isPlaying', False)
+
+    event = ProgressUpdatedEvent(
+        bv=bv,
+        progress=float(progress) if progress else 0.0,
+        is_playing=bool(is_playing),
+    )
+    dispatcher.publish(event)
+
+    send_message({
+        'type': 'status',
+        'payload': {
+            'status': 'ok',
+            'message': f'Received progress_update for BV={bv}',
+        }
+    })
+
+
+def handle_message(msg: dict) -> None:
+    """Process a single message from the extension.
+
+    Prints structured info to stderr, then dispatches to the
+    appropriate handler based on message type.
+
+    Args:
+        msg: Parsed JSON message dict from the extension.
     """
     msg_type = msg.get('type', 'unknown')
     payload = msg.get('payload', {})
@@ -125,46 +369,13 @@ def handle_message(msg):
 
     print(f'[BiliDanmaku]   Resolver: {resolver_name} (level={resolver_level})', file=sys.stderr)
 
-    # ── v0.2.0-alpha: video_switch 触发弹幕获取 ──────────────────
+    # ── Dispatch by message type ──────────────────────────────────
     if msg_type == 'video_switch':
-        cookie = payload.get('cookies', None)
-        result = handle_video_switch(
-            bv=bv,
-            cid=cid,
-            title=str(title),
-            resolver_level=str(resolver_level),
-            cookie=cookie if cookie else None,
-        )
-        print(result['summary'], file=sys.stderr)
-
-        # 回复状态
-        if result['success']:
-            send_message({
-                'type': 'status',
-                'payload': {
-                    'status': 'ok',
-                    'message': f'Danmaku loaded: {result["result"].total if result["result"] else 0} items',
-                }
-            })
-        else:
-            send_message({
-                'type': 'status',
-                'payload': {
-                    'status': 'error',
-                    'message': result.get('error', 'danmaku fetch failed'),
-                }
-            })
+        _handle_video_switch_message(payload)
     elif msg_type == 'progress_update':
-        # progress_update 暂不触发业务逻辑 (v0.3+ 同步)
-        send_message({
-            'type': 'status',
-            'payload': {
-                'status': 'ok',
-                'message': f'Received {msg_type} for BV={bv}',
-            }
-        })
+        _handle_progress_update_message(payload)
     else:
-        # 未知消息类型 — 仍然回复 ack
+        # Unknown message type — ack anyway
         send_message({
             'type': 'status',
             'payload': {
@@ -174,16 +385,19 @@ def handle_message(msg):
         })
 
 
-def main():
-    # Redirect stderr to both terminal and log file.
-    # This ensures Chrome-launched instances (no console) still produce
-    # readable logs for debugging.
-    sys.stderr = TeeStderr(_LOG_FILE)
+# ── Stdin Reader Thread ──────────────────────────────────────────
 
-    print('[BiliDanmaku] ========================================', file=sys.stderr)
-    print('[BiliDanmaku] Native Host 已启动 (MVP v0.1)', file=sys.stderr)
-    print('[BiliDanmaku] 等待浏览器扩展连接...', file=sys.stderr)
-    print('[BiliDanmaku] ========================================', file=sys.stderr)
+
+def stdin_reader_loop(integration: DanmakuIntegration) -> None:
+    """Background thread: read Native Messaging messages from stdin.
+
+    Runs as a daemon thread. When stdin closes (Chrome disconnects),
+    signals the GUI thread to quit via integration.quit_requested.
+
+    Args:
+        integration: DanmakuIntegration instance for quit signalling.
+    """
+    print('[BiliDanmaku] stdin reader thread started', file=sys.stderr)
 
     msg_count = 0
     while True:
@@ -191,14 +405,21 @@ def main():
         try:
             msg = read_message()
             if msg is None:
-                print(f'[BiliDanmaku] 连接断开, 已处理 {msg_count} 条消息, 退出', file=sys.stderr)
+                print(
+                    f'[BiliDanmaku] 连接断开, 已处理 {msg_count} 条消息, 退出',
+                    file=sys.stderr,
+                )
                 break
 
             msg_count += 1
             handle_message(msg)
+
         except Exception as e:
             msg_count += 1
-            print(f'[BiliDanmaku] 消息处理异常 (#{msg_count}): {e}', file=sys.stderr)
+            print(
+                f'[BiliDanmaku] 消息处理异常 (#{msg_count}): {e}',
+                file=sys.stderr,
+            )
             traceback.print_exc(file=sys.stderr)
             # Reply with error status so extension knows something went wrong
             try:
@@ -212,6 +433,80 @@ def main():
             except Exception:
                 pass
             # Continue — next message may be fine
+
+    # Signal GUI thread to quit cleanly
+    integration.quit_requested.emit()
+
+
+# ── Main Entry Point ─────────────────────────────────────────────
+
+
+def main() -> None:
+    """Application entry point.
+
+    Startup order (must be followed for Qt thread safety):
+        1. QApplication          — must be first
+        2. TeeStderr             — log everything early
+        3. Overlay modules       — window, tray, queue, renderer
+        4. Wire render callback  — window.set_renderer(renderer.render)
+        5. DanmakuIntegration    — connects dispatcher ↔ overlay
+        6. Start renderer        — begin frame loop
+        7. Show window + tray
+        8. Stdin thread          — begin reading Chrome messages
+        9. Qt event loop         — blocks until quit
+    """
+    # 1. QApplication (must be first — required by all Qt objects)
+    app = QApplication(sys.argv)
+    app.setApplicationName('BiliDanmaku')
+    # Don't quit when overlay window is closed (tray controls lifecycle)
+    app.setQuitOnLastWindowClosed(False)
+
+    # 2. TeeStderr — capture all logs to file + terminal
+    sys.stderr = TeeStderr(_LOG_FILE)
+
+    print('[BiliDanmaku] ========================================', file=sys.stderr)
+    print('[BiliDanmaku] Native Host 已启动 (v0.2.x)', file=sys.stderr)
+    print('[BiliDanmaku] Overlay + Dispatcher 集成模式', file=sys.stderr)
+    print('[BiliDanmaku] 等待浏览器扩展连接...', file=sys.stderr)
+    print('[BiliDanmaku] ========================================', file=sys.stderr)
+
+    # 3. Overlay modules
+    window = TransparentOverlay()
+    tray = TrayIcon(parent=app)
+    queue = DanmakuQueue()
+    renderer = DanmakuRenderer()
+    renderer.set_render_area(window.render_area())
+
+    # 4. Wire render callback — paintEvent → renderer.render()
+    window.set_renderer(renderer.render)
+
+    # 5. Integration coordinator (subscribes to dispatcher events)
+    integration = DanmakuIntegration(queue, renderer, window, tray)
+    integration.quit_requested.connect(app.quit)
+
+    # 6. Start rendering frame loop (~30fps QTimer)
+    renderer.start()
+
+    # 7. Show UI
+    tray.show()
+    window.show()
+
+    # 8. Background stdin reader thread
+    stdin_thread = threading.Thread(
+        target=stdin_reader_loop,
+        args=(integration,),
+        daemon=True,
+        name='stdin-reader',
+    )
+    stdin_thread.start()
+
+    # 9. Qt event loop (blocks until QApplication.quit())
+    exit_code = app.exec()
+
+    # 10. Cleanup
+    renderer.stop()
+    renderer.clear()
+    print(f'[BiliDanmaku] 进程退出, exit_code={exit_code}', file=sys.stderr)
 
 
 if __name__ == '__main__':
