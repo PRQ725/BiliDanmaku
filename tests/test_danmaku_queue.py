@@ -342,6 +342,47 @@ class TestQueueTick:
         contents = {item.content for item in result}
         assert contents == {'a', 'b', 'c'}
 
+    def test_tick_preserves_duplicate_content(self) -> None:
+        """相同文本但不同 danmaku_id/timestamp 的弹幕全部保留并发射。
+
+        "每条仅一次" 指同一 DanmakuItem 不会被 tick() 重复返回，
+        不是内容去重。B站大量重复弹幕是正常现象。
+        """
+        q = DanmakuQueue()
+        # 3 条完全相同的文本，但 ID 和时间戳不同
+        items = [
+            _dm(time=1.0, content='666', danmaku_id=101, timestamp=1000),
+            _dm(time=1.5, content='666', danmaku_id=102, timestamp=1001),
+            _dm(time=2.0, content='666', danmaku_id=103, timestamp=1002),
+            # 穿插其他内容的重复
+            _dm(time=3.0, content='哈哈哈', danmaku_id=201, timestamp=1003),
+            _dm(time=3.5, content='666', danmaku_id=104, timestamp=1004),
+            _dm(time=4.0, content='哈哈哈', danmaku_id=202, timestamp=1005),
+        ]
+        q.load(items)
+
+        # 全部 6 条都应被保留
+        assert q.total == 6
+
+        # 一次发射全部
+        result = q.tick(10.0)
+        assert len(result) == 6
+
+        # 内容为 '666' 的 4 条全部存在
+        sixes = [item for item in result if item.content == '666']
+        assert len(sixes) == 4
+        six_ids = sorted(item.danmaku_id for item in sixes)
+        assert six_ids == [101, 102, 103, 104]
+
+        # 内容为 '哈哈哈' 的 2 条全部存在
+        hahas = [item for item in result if item.content == '哈哈哈']
+        assert len(hahas) == 2
+        assert sorted(item.danmaku_id for item in hahas) == [201, 202]
+
+        # 第二轮 tick 不应再返回任何弹幕
+        result2 = q.tick(10.0)
+        assert result2 == []
+
     def test_tick_zero_elapsed(self) -> None:
         """elapsed=0 不应发射任何弹幕（弹幕 time > 0）。"""
         q = DanmakuQueue()

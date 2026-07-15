@@ -3,7 +3,10 @@
 #
 # 设计原则:
 #   - 弹幕按 video_time 排序存储，tick(elapsed) 返回当前应发射的弹幕。
-#   - 每条弹幕仅发射一次（基于索引指针递增，非 ID 去重）。
+#   - 每条弹幕仅发射一次（基于索引指针递增）。
+#     注意: 这不是内容去重。相同文本但不同 danmaku_id/timestamp 的弹幕
+#     必须全部保留并发送给 renderer。B站大量重复弹幕是正常现象。
+#     v0.2 不实现任何 deduplication 逻辑。
 #   - 最大容量限制（默认 2000 条），超出截断保留最早的弹幕。
 #   - 线程安全: 所有公开方法使用 threading.Lock 保护内部状态。
 #   - 零业务依赖: 不依赖 PyQt / events / data_dispatcher / main_window。
@@ -45,7 +48,14 @@ class DanmakuQueue:
     """弹幕缓冲队列。
 
     按弹幕时间排序存储，基于墙上时钟时间 (elapsed) 发射弹幕。
-    每条弹幕仅发射一次，视频切换时自动清空旧弹幕。
+    每条弹幕仅发射一次（索引指针机制，不进行内容去重）。
+    视频切换时自动清空旧弹幕。
+
+    去重语义:
+        "每条仅一次"指同一个 DanmakuItem 不会被 tick() 重复返回。
+        不做内容级去重 — 相同文本但不同 danmaku_id / timestamp 的弹幕
+        全部保留并发送给 renderer。B站大量重复弹幕是正常现象。
+        v0.2 不实现 deduplication。
 
     线程安全: 所有公开方法使用 threading.Lock 保护内部状态。
     调用方可在任意线程调用 tick() / load() / clear()。
