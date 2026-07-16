@@ -4,6 +4,11 @@
 const LOG_PREFIX = '[BiliDanmaku]';
 const NATIVE_HOST_NAME = 'com.bili.danmaku';
 const PROGRESS_THROTTLE_MS = 1000; // rate-limit progress updates to 1/s
+const STORAGE_KEY = 'biliDanmakuState';
+// After 30 min away, treat as a fresh viewing session rather than a resume.
+// Covers the case where both the SW and Python were terminated (browser
+// restart / long idle) — Python needs a fresh video_switch to load state.
+const SESSION_EXPIRY_MS = 30 * 60 * 1000;
 
 // ═══════════════════════════════════════════════════════════
 // State
@@ -12,6 +17,14 @@ const PROGRESS_THROTTLE_MS = 1000; // rate-limit progress updates to 1/s
 let nativePort = null;
 let lastBv = null;
 let lastProgressTime = 0;
+// True when the Native Messaging port was freshly established (new Python
+// process).  Consumed by the first message to decide whether a matching BV
+// still needs a video_switch (Python is stateless and must be seeded).
+let nativePortJustConnected = false;
+// True once chrome.storage.local.get() has completed.  Messages arriving
+// before that are queued in pendingMessages and replayed afterwards.
+let storageLoaded = false;
+let pendingMessages = [];
 
 // ═══════════════════════════════════════════════════════════
 // Native Messaging Connection
@@ -21,6 +34,7 @@ function connectNative() {
     console.log(LOG_PREFIX, '正在连接 Native Host:', NATIVE_HOST_NAME);
     try {
         nativePort = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+        nativePortJustConnected = true; // fresh port = new Python process
         console.log(LOG_PREFIX, 'Native Host 已连接');
 
         nativePort.onMessage.addListener((msg) => {
@@ -72,6 +86,51 @@ function resetReconnectState() {
 }
 
 // ═══════════════════════════════════════════════════════════
+// Persistent State (chrome.storage.local)
+// ═══════════════════════════════════════════════════════════
+
+/** Persist lastBv so SW cold-restarts can avoid spurious video_switch. */
+function persistState(bv) {
+    chrome.storage.local.set({
+        [STORAGE_KEY]: { lastBv: bv, lastUpdateTime: Date.now() }
+    }).catch(() => {
+        // storage may be unavailable in some Chrome configurations
+    });
+}
+
+/** Recover lastBv from storage on SW cold-start. */
+function loadStoredState() {
+    chrome.storage.local.get(STORAGE_KEY, (result) => {
+        try {
+            const data = result[STORAGE_KEY];
+            if (data && data.lastBv && data.lastUpdateTime) {
+                const age = Date.now() - data.lastUpdateTime;
+                if (age < SESSION_EXPIRY_MS) {
+                    lastBv = data.lastBv;
+                    console.log(LOG_PREFIX,
+                        '从 storage 恢复 lastBv:', lastBv,
+                        `(age=${Math.round(age / 1000)}s)`);
+                } else {
+                    console.log(LOG_PREFIX,
+                        'storage 中的 lastBv 已过期',
+                        `(age=${Math.round(age / 60000)}min), 视为新会话`);
+                }
+            }
+        } catch (e) {
+            console.warn(LOG_PREFIX, 'storage 恢复失败:', e.message);
+        }
+        storageLoaded = true;
+
+        // Replay any messages that arrived before storage was ready
+        const queued = pendingMessages;
+        pendingMessages = [];
+        for (const { message, sender } of queued) {
+            routeMessage(message, sender);
+        }
+    });
+}
+
+// ═══════════════════════════════════════════════════════════
 // Message Routing (from content.js)
 // ═══════════════════════════════════════════════════════════
 
@@ -99,20 +158,51 @@ function sendToNative(type, payload) {
     }
 }
 
-chrome.runtime.onMessage.addListener((message, sender) => {
+/**
+ * Core message router.
+ *
+ * Separated from the onMessage listener so that messages queued before
+ * chrome.storage.local has loaded can be replayed through the same path.
+ *
+ * Video-switch logic:
+ *   1. BV changed (real switch / first time) → video_switch + persist
+ *   2. Same BV + port freshly connected → video_switch (Python is a new
+ *      process and needs to be seeded — port reconnect = new Python)
+ *   3. Same BV + same session → progress_update (throttled)
+ *
+ * The nativePortJustConnected flag is consumed (set to false) after the
+ * first message that sees it, so subsequent messages in the same session
+ * take the progress_update path.
+ */
+function routeMessage(message, sender) {
     // Only accept messages from our content script
     if (!message || message.type !== 'video_info') return;
-    if (!sender.tab) return;
+    if (!sender || !sender.tab) return;
     if (!isBilibiliVideoPage(message.pageUrl)) return;
 
     const bv = message.bv;
     const now = Date.now();
+    const portIsFresh = nativePortJustConnected;
+    nativePortJustConnected = false;
 
-    // Detect video switch (BV changed)
-    if (bv && bv !== lastBv) {
-        console.log(LOG_PREFIX, '视频切换:', lastBv, '→', bv);
+    // ── Video switch: BV changed ─────────────────────────────
+    const bvChanged = (bv && bv !== lastBv);
+
+    // ── Video switch: port reconnected (new Python, same BV) ─
+    // Python is stateless — a fresh connection means it has no danmaku
+    // loaded, so we must re-send video_switch even for the same BV.
+    const needsReseed = (bv && bv === lastBv && portIsFresh);
+
+    if (bvChanged || needsReseed) {
+        if (bvChanged) {
+            console.log(LOG_PREFIX, '视频切换:', lastBv, '→', bv);
+        } else {
+            console.log(LOG_PREFIX,
+                'Native Port 重连 (同 BV=' + bv + '), 重新发送 video_switch');
+            resetReconnectState();
+        }
         lastBv = bv;
-        resetReconnectState();
+        persistState(bv);
 
         sendToNative('video_switch', {
             bv: message.bv,
@@ -128,7 +218,7 @@ chrome.runtime.onMessage.addListener((message, sender) => {
         return;
     }
 
-    // Progress update (throttled: max 1/s per BV)
+    // ── Same BV, same session → progress_update (throttled) ─
     if (bv && bv === lastBv) {
         if (now - lastProgressTime < PROGRESS_THROTTLE_MS) return;
         lastProgressTime = now;
@@ -139,6 +229,16 @@ chrome.runtime.onMessage.addListener((message, sender) => {
             isPlaying: message.isPlaying,
         });
     }
+}
+
+chrome.runtime.onMessage.addListener((message, sender) => {
+    // Queue messages until storage state is loaded (SW cold-start).
+    // Once storageLoaded, routeMessage is called directly.
+    if (!storageLoaded) {
+        pendingMessages.push({ message, sender });
+        return;
+    }
+    routeMessage(message, sender);
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -146,6 +246,7 @@ chrome.runtime.onMessage.addListener((message, sender) => {
 // ═══════════════════════════════════════════════════════════
 
 console.log(LOG_PREFIX, 'Service Worker 已启动');
+loadStoredState();
 connectNative();
 
 // Re-connect when SW wakes up from suspend (if port is gone)

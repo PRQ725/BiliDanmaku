@@ -181,13 +181,25 @@ class DanmakuIntegration(QObject):
         Called synchronously from dispatcher.publish() in the stdin thread.
         queue.load() is thread-safe. renderer.clear() is deferred to
         _on_frame (GUI thread) via _pending_clear flag.
+
+        Video-switch semantic: the old video's danmaku are always invalid,
+        regardless of whether the new video's fetch succeeds.  Clearing is
+        unconditional — a failed fetch means the screen should be empty,
+        not stuck on stale content.
         """
+        # Defer renderer clear to GUI thread — must NOT call
+        # renderer.clear() here (cross-thread Qt access).
+        # Clear is unconditional: old video is always stale.
+        self._pending_clear = True
+
         if event.success:
-            # Defer renderer clear to GUI thread — must NOT call
-            # renderer.clear() here (cross-thread Qt access).
-            self._pending_clear = True
             self._queue.load(event.items)
             self._wall_clock_start = time.monotonic()
+        else:
+            # Clear stale queue so old items don't re-enter renderer.
+            # wall_clock_start stays None → _on_frame stops ticking.
+            self._queue.clear()
+            self._wall_clock_start = None
 
     def _on_progress_updated(self, event: ProgressUpdatedEvent) -> None:
         """Handle PROGRESS_UPDATED: v0.2 no-op.

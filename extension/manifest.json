@@ -13,7 +13,8 @@
 
     "permissions": [
         "scripting",
-        "nativeMessaging"
+        "nativeMessaging",
+        "storage"
     ],
 
     "background": {

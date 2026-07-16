@@ -280,6 +280,81 @@ class TestDanmakuIntegration:
         assert integration._pending_clear is False
         assert integration._renderer._active[0].item.danmaku_id == 99
 
+    def test_danmaku_loaded_failure_clears_renderer(
+        self, integration: DanmakuIntegration, danmaku_items: list
+    ) -> None:
+        """Failed DANMAKU_LOADED still clears old active danmaku from renderer.
+
+        Video-switch semantic: the old video is always stale.  Even when
+        the new video's danmaku fetch fails, the renderer must be cleared
+        so stale danmaku don't keep scrolling.
+        """
+        # 1. Simulate first video: load + emit all items to fill renderer
+        event1 = DanmakuLoadedEvent(
+            bv='BVold', cid=111, title='Old',
+            success=True, items=danmaku_items, total=3, summary='',
+        )
+        integration._on_danmaku_loaded(event1)
+        integration._wall_clock_start = time.monotonic() - 10.0
+        integration._on_frame()
+        assert integration._renderer.active_count == 3
+
+        # 2. Simulate failed video switch (e.g. cid补全失败, HTTP 412)
+        event2 = DanmakuLoadedEvent(
+            bv='BVnew', cid=0, title='New',
+            success=False, items=[], total=0,
+            error='fetch failed', summary='error',
+        )
+        integration._on_danmaku_loaded(event2)
+
+        # Pending clear must be set regardless of success
+        assert integration._pending_clear is True
+        # Old danmaku still active until _on_frame runs
+        assert integration._renderer.active_count == 3
+
+        # 3. First _on_frame after failed switch: clears old, emits nothing
+        integration._on_frame()
+
+        assert integration._renderer.active_count == 0
+        assert integration._pending_clear is False
+
+    def test_danmaku_loaded_failure_clears_queue_and_stops_clock(
+        self, integration: DanmakuIntegration, danmaku_items: list
+    ) -> None:
+        """Failed DANMAKU_LOADED clears queue and stops wall clock.
+
+        After a failed fetch the queue must be empty (no stale items) and
+        wall_clock_start must be None so _on_frame stops ticking.
+        """
+        # 1. Load some danmaku successfully
+        event1 = DanmakuLoadedEvent(
+            bv='BVold', cid=111, title='Old',
+            success=True, items=danmaku_items, total=3, summary='',
+        )
+        integration._on_danmaku_loaded(event1)
+        assert integration._queue.total == 3
+        assert integration._wall_clock_start is not None
+
+        # 2. Failed switch
+        event2 = DanmakuLoadedEvent(
+            bv='BVnew', cid=0, title='New',
+            success=False, items=[], total=0,
+            error='API error', summary='error',
+        )
+        integration._on_danmaku_loaded(event2)
+
+        # Queue must be cleared
+        assert integration._queue.total == 0
+        assert integration._queue.remaining == 0
+        # Wall clock must be stopped
+        assert integration._wall_clock_start is None
+
+        # 3. _on_frame should clear renderer but emit nothing
+        integration._wall_clock_start = time.monotonic() - 10.0  # simulate advance
+        integration._on_frame()
+        # Even with a fake wall_clock_start, no items in queue → nothing emitted
+        assert integration._renderer.active_count == 0
+
     def test_quit_requested_signal_exists(
         self, integration: DanmakuIntegration
     ) -> None:
