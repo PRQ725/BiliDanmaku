@@ -281,19 +281,19 @@ Chrome 退出 → Native Messaging port 断开
 
 **修改 Python 代码后必须运行 pytest，全部通过。**
 
-| 测试文件 | 框架 | 数量 | 依赖 | 覆盖领域 |
-|----------|------|------|------|----------|
-| `tests/test_danmaku_parser.py` | unittest | 23 | 无 | XML 解析、DanmakuItem 字段 |
-| `tests/test_dispatcher.py` | unittest | 52 | 无 | 事件订阅/发布/取消、类型推断、线程安全 |
-| `tests/test_danmaku_queue.py` | pytest | 50 | 无 | 排序、tick 发射、容量截断、线程安全 |
-| `tests/test_overlay.py` | pytest | 37 | PyQt6 | 窗口属性、鼠标穿透、托盘图标 |
-| `tests/test_danmaku_renderer.py` | pytest | 75 | PyQt6 | 轨道分配、弹幕滚动、模式过滤、帧逻辑 |
-| `tests/test_integration.py` | pytest | 23 | PyQt6 | DanmakuIntegration 完整链路、video_unload、窗口显隐 |
+| 测试文件 | 框架 | 依赖 | 覆盖领域 |
+|----------|------|------|----------|
+| `tests/test_danmaku_parser.py` | unittest | 无 | XML 解析、DanmakuItem 字段 |
+| `tests/test_dispatcher.py` | unittest | 无 | 事件订阅/发布/取消、类型推断、线程安全 |
+| `tests/test_danmaku_queue.py` | pytest | 无 | 排序、tick 发射、容量截断、线程安全 |
+| `tests/test_overlay.py` | pytest | PyQt6 | 窗口属性、鼠标穿透、托盘图标 |
+| `tests/test_danmaku_renderer.py` | pytest | PyQt6 | 轨道分配、弹幕滚动、模式过滤、帧逻辑 |
+| `tests/test_integration.py` | pytest | PyQt6 | DanmakuIntegration 完整链路、video_unload、窗口显隐 |
 
 运行方式:
 ```bash
 # 全部测试
-cd d:\Projects\BiliDanmaku && python -m pytest tests/ -v
+python -m pytest tests/ -v
 
 # 不需要 PyQt 的测试 (CI/快速验证)
 python -m pytest tests/test_danmaku_parser.py tests/test_dispatcher.py tests/test_danmaku_queue.py -v
@@ -403,11 +403,9 @@ python -m pytest tests/test_danmaku_parser.py tests/test_dispatcher.py tests/tes
 
 ---
 
-# 项目状态参考
+# 模块依赖参考
 
 ## 当前版本: v0.2.x
-
-最新提交: `bfe2d62` — "Complete v0.2.x fix video switch cleanup and SW persistence"
 
 ## 模块依赖关系 (Python)
 
@@ -427,12 +425,3 @@ native_host.py         ← 所有模块 (编排入口)
 ```
 
 无循环依赖。依赖方向: 纯数据层 → 逻辑层 → 编排层。
-
-## 已完成 Issues
-
-| Issue | 内容 | 状态 |
-|-------|------|------|
-| Issue 1 | 惰性连接 (不浏览 B站不启动 Python) | ✅ |
-| Issue 3 | SW 持久化 (冷启动不虚假 video_switch) | ✅ |
-| Issue 4 | 重连退避 (断开后指数退避重连) | ✅ |
-| Issue 5 | 关闭 tab 停止弹幕 (pagehide → video_unload → window.hide) | ✅ 待用户验证 |
