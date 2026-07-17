@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import QApplication
 
 from danmaku_handler import handle_video_switch
 from data_dispatcher import dispatcher
-from events import EventType, DanmakuLoadedEvent, ProgressUpdatedEvent
+from events import EventType, DanmakuLoadedEvent, ProgressUpdatedEvent, VideoUnloadEvent
 from overlay.main_window import TransparentOverlay
 from overlay.tray_icon import TrayIcon
 from overlay.danmaku_queue import DanmakuQueue
@@ -172,6 +172,7 @@ class DanmakuIntegration(QObject):
         # only happen via _on_frame (GUI thread).
         dispatcher.subscribe(EventType.DANMAKU_LOADED, self._on_danmaku_loaded)
         dispatcher.subscribe(EventType.PROGRESS_UPDATED, self._on_progress_updated)
+        dispatcher.subscribe(EventType.VIDEO_UNLOAD, self._on_video_unload)
 
     # ── Dispatcher callbacks (called from background thread) ──────
 
@@ -208,6 +209,21 @@ class DanmakuIntegration(QObject):
         """
         pass
 
+    def _on_video_unload(self, event: VideoUnloadEvent) -> None:
+        """Handle VIDEO_UNLOAD: clear all danmaku state.
+
+        Called synchronously from dispatcher.publish() in the stdin thread
+        when the user closes the B站 video tab or navigates away.
+
+        Clears:
+            - queue (thread-safe) — all buffered danmaku discarded
+            - wall clock — stops _on_frame from ticking new items
+            - _pending_clear — triggers renderer.clear() on next _on_frame
+        """
+        self._pending_clear = True
+        self._queue.clear()
+        self._wall_clock_start = None
+
     # ── Frame callback (called from GUI thread) ──────────────────
 
     def _on_frame(self) -> None:
@@ -222,8 +238,21 @@ class DanmakuIntegration(QObject):
             self._renderer.clear()
             self._pending_clear = False
 
+        # ── Window visibility ──────────────────────────────────
+        # _wall_clock_start is None when no video is active
+        # (video_unload, app startup before first video_switch,
+        # or failed danmaku fetch).  Hide the overlay so it
+        # doesn't linger as an empty transparent sheet on screen.
         if self._wall_clock_start is None:
+            if self._window.isVisible():
+                self._window.hide()
             return
+
+        # _wall_clock_start is set → active video session.
+        # Ensure the overlay is visible (re-show after video_unload
+        # or initial show for first video_switch).
+        if not self._window.isVisible():
+            self._window.show()
 
         elapsed = time.monotonic() - self._wall_clock_start
         new_items = self._queue.tick(elapsed)
@@ -339,6 +368,21 @@ def _handle_progress_update_message(payload: dict) -> None:
     })
 
 
+def _handle_video_unload_message(payload: dict) -> None:
+    """Process a video_unload message from the extension.
+
+    Fires when the user closes the B站 video tab or navigates away.
+    Publishes VideoUnloadEvent to clear all danmaku state:
+    renderer, queue, and wall clock.
+
+    Args:
+        payload: The message payload dict (unused — event is metadata-only).
+    """
+    print('[BiliDanmaku] [lifecycle] 收到 video_unload — 清理渲染状态', file=sys.stderr)
+    event = VideoUnloadEvent()
+    dispatcher.publish(event)
+
+
 def handle_message(msg: dict) -> None:
     """Process a single message from the extension.
 
@@ -386,6 +430,8 @@ def handle_message(msg: dict) -> None:
         _handle_video_switch_message(payload)
     elif msg_type == 'progress_update':
         _handle_progress_update_message(payload)
+    elif msg_type == 'video_unload':
+        _handle_video_unload_message(payload)
     else:
         # Unknown message type — ack anyway
         send_message({
@@ -412,18 +458,22 @@ def stdin_reader_loop(integration: DanmakuIntegration) -> None:
     print('[BiliDanmaku] stdin reader thread started', file=sys.stderr)
 
     msg_count = 0
+    last_msg_time = time.monotonic()
     while True:
         msg = None
         try:
             msg = read_message()
             if msg is None:
+                idle_sec = time.monotonic() - last_msg_time
                 print(
-                    f'[BiliDanmaku] 连接断开, 已处理 {msg_count} 条消息, 退出',
+                    f'[BiliDanmaku] 连接断开, 已处理 {msg_count} 条消息, '
+                    f'idle={idle_sec:.0f}s, 退出',
                     file=sys.stderr,
                 )
                 break
 
             msg_count += 1
+            last_msg_time = time.monotonic()
             handle_message(msg)
 
         except Exception as e:
@@ -447,6 +497,10 @@ def stdin_reader_loop(integration: DanmakuIntegration) -> None:
             # Continue — next message may be fine
 
     # Signal GUI thread to quit cleanly
+    print(
+        '[BiliDanmaku] [lifecycle] stdin_reader_loop 退出 → 发送 quit_requested',
+        file=sys.stderr,
+    )
     integration.quit_requested.emit()
 
 
@@ -478,6 +532,7 @@ def main() -> None:
 
     print('[BiliDanmaku] ========================================', file=sys.stderr)
     print('[BiliDanmaku] Native Host 已启动 (v0.2.x)', file=sys.stderr)
+    print(f'[BiliDanmaku] [lifecycle] PID={os.getpid()} 启动时间={datetime.now().isoformat()}', file=sys.stderr)
     print('[BiliDanmaku] Overlay + Dispatcher 集成模式', file=sys.stderr)
     print('[BiliDanmaku] 等待浏览器扩展连接...', file=sys.stderr)
     print('[BiliDanmaku] ========================================', file=sys.stderr)
@@ -495,6 +550,10 @@ def main() -> None:
     # 5. Integration coordinator (subscribes to dispatcher events)
     integration = DanmakuIntegration(queue, renderer, window, tray)
     integration.quit_requested.connect(app.quit)
+    # 诊断日志：quit_requested 信号在 GUI 线程被接收时记录
+    integration.quit_requested.connect(
+        lambda: print('[BiliDanmaku] [lifecycle] quit_requested 信号已接收 → app.quit() 已调用', file=sys.stderr)
+    )
 
     # 6. Start rendering frame loop (~30fps QTimer)
     renderer.start()
@@ -513,12 +572,18 @@ def main() -> None:
     stdin_thread.start()
 
     # 9. Qt event loop (blocks until QApplication.quit())
+    print('[BiliDanmaku] [lifecycle] 进入 Qt 事件循环 (app.exec)', file=sys.stderr)
     exit_code = app.exec()
+    print(f'[BiliDanmaku] [lifecycle] app.exec 返回, exit_code={exit_code}', file=sys.stderr)
 
-    # 10. Cleanup
+    # 10. Cleanup — 先隐藏窗口避免残留冻结画面
+    print('[BiliDanmaku] [lifecycle] window.hide()', file=sys.stderr)
+    window.hide()
+    print('[BiliDanmaku] [lifecycle] renderer.stop()', file=sys.stderr)
     renderer.stop()
+    print('[BiliDanmaku] [lifecycle] renderer.clear()', file=sys.stderr)
     renderer.clear()
-    print(f'[BiliDanmaku] 进程退出, exit_code={exit_code}', file=sys.stderr)
+    print(f'[BiliDanmaku] [lifecycle] 进程退出, exit_code={exit_code}', file=sys.stderr)
 
 
 if __name__ == '__main__':

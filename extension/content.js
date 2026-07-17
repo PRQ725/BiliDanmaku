@@ -375,6 +375,42 @@ function startExtraction(delayMs) {
     }
 }
 
+// ═══════════════════════════════════════════════════════════
+// Page Lifecycle
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * Notify background.js that this B站 video page is being unloaded.
+ *
+ * Fires on tab close, browser close, and navigation away from B站.
+ * Does NOT fire during SPA navigation within B站 (no page unload).
+ *
+ * The video_unload message triggers a full pipeline clear:
+ *   background.js → native_host.py → dispatcher → renderer.clear() + queue.clear()
+ */
+function sendVideoUnload() {
+    console.log(LOG_PREFIX, '页面卸载, 发送 video_unload');
+    chrome.runtime.sendMessage({ type: 'video_unload' }).catch(() => {
+        // Extension context may already be torn down — that's fine
+    });
+}
+
+window.addEventListener('pagehide', () => {
+    sendVideoUnload();
+    if (currentMonitor) {
+        currentMonitor.destroy();
+        currentMonitor = null;
+    }
+    if (currentNavigator) {
+        currentNavigator.destroy();
+        currentNavigator = null;
+    }
+});
+
+// ═══════════════════════════════════════════════════════════
+// Main Entry
+// ═══════════════════════════════════════════════════════════
+
 // Bootstrap
 console.log(LOG_PREFIX, 'Content Script 已加载, URL:', location.href);
 startExtraction();

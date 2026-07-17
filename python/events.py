@@ -26,6 +26,7 @@ class EventType(Enum):
     VIDEO_SWITCHED = auto()   # 浏览器检测到视频切换 (payload: VideoSwitchedEvent)
     DANMAKU_LOADED = auto()   # 弹幕获取+解析完成 (payload: DanmakuLoadedEvent)
     PROGRESS_UPDATED = auto() # 浏览器上报播放进度 (payload: ProgressUpdatedEvent)
+    VIDEO_UNLOAD = auto()     # 浏览器页面关闭/导航离开 (payload: VideoUnloadEvent)
 
 
 # ── Event Data Classes ──────────────────────────────────────────────
@@ -74,3 +75,16 @@ class ProgressUpdatedEvent:
     bv: str
     progress: float           # currentTime (秒)
     is_playing: bool = False
+
+
+@dataclass
+class VideoUnloadEvent:
+    """视频页面卸载事件 — 用户关闭或离开 B站视频页面。
+
+    对应 extension/content.js pagehide 事件 → background.js video_unload 消息。
+    触发全管线清理：renderer.clear() + queue.clear() + 停止时钟。
+
+    消费方:
+        - DanmakuIntegration: 清空所有弹幕状态并停止发射。
+    """
+    pass  # metadata-only event — the signal itself is the payload

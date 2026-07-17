@@ -9,6 +9,10 @@ const STORAGE_KEY = 'biliDanmakuState';
 // Covers the case where both the SW and Python were terminated (browser
 // restart / long idle) — Python needs a fresh video_switch to load state.
 const SESSION_EXPIRY_MS = 30 * 60 * 1000;
+// Prevent infinite reconnect loop when user manually closes Python.
+// After MAX_RECONNECT_ATTEMPTS failures, give up until a new user action
+// (opening a B站 video page) triggers a fresh lazy connection.
+const MAX_RECONNECT_ATTEMPTS = 5;
 
 // ═══════════════════════════════════════════════════════════
 // State
@@ -30,12 +34,14 @@ let pendingMessages = [];
 // Native Messaging Connection
 // ═══════════════════════════════════════════════════════════
 
-function connectNative() {
-    console.log(LOG_PREFIX, '正在连接 Native Host:', NATIVE_HOST_NAME);
+function connectNative(reason = 'startup') {
+    console.log(LOG_PREFIX, '[lifecycle] connectNative 调用',
+        '原因:', reason,
+        '时间:', new Date().toISOString());
     try {
         nativePort = chrome.runtime.connectNative(NATIVE_HOST_NAME);
         nativePortJustConnected = true; // fresh port = new Python process
-        console.log(LOG_PREFIX, 'Native Host 已连接');
+        console.log(LOG_PREFIX, '[lifecycle] Native Host 已连接 (reason=' + reason + ')');
 
         nativePort.onMessage.addListener((msg) => {
             console.log(LOG_PREFIX, 'Python 回复:', JSON.stringify(msg));
@@ -43,17 +49,19 @@ function connectNative() {
 
         nativePort.onDisconnect.addListener(() => {
             const lastError = chrome.runtime.lastError;
-            console.warn(LOG_PREFIX, 'Native Host 连接断开',
-                lastError ? lastError.message : '');
+            console.warn(LOG_PREFIX, '[lifecycle] Native Host 连接断开',
+                lastError ? 'error: ' + lastError.message : '(无错误信息)',
+                'lastBv:', lastBv || '(无)');
             nativePort = null;
 
-            // [Beta] Attempt reconnection
+            // Attempt reconnection (limited by MAX_RECONNECT_ATTEMPTS)
             attemptReconnect();
         });
     } catch (e) {
-        console.error(LOG_PREFIX, 'connectNative 失败:', e.message);
+        console.error(LOG_PREFIX, '[lifecycle] connectNative 失败:', e.message,
+            'reason:', reason);
         nativePort = null;
-        // [Beta] Attempt reconnection
+        // Attempt reconnection (limited by MAX_RECONNECT_ATTEMPTS)
         attemptReconnect();
     }
 }
@@ -64,16 +72,26 @@ let reconnectTimer = null;
 const MAX_BACKOFF_MS = 30000;
 
 function attemptReconnect() {
+    if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
+        console.warn(LOG_PREFIX,
+            '[lifecycle] 重连次数达到上限 (' + MAX_RECONNECT_ATTEMPTS + '), 等待新的用户操作',
+            '(lastBv:', lastBv || '(无)', ')');
+        return;
+    }
     if (reconnectTimer) return; // already scheduled
 
     const delays = [1000, 2000, 4000, 8000, 16000, 30000];
     const delay = delays[Math.min(reconnectAttempt, delays.length - 1)];
+    const hasBilibiliSession = !!(lastBv);
 
-    console.log(LOG_PREFIX, `[Beta] 将在 ${delay}ms 后尝试重连 (attempt ${reconnectAttempt + 1})`);
+    console.log(LOG_PREFIX,
+        '[lifecycle] attemptReconnect 第' + (reconnectAttempt + 1) + '次',
+        'delay=' + delay + 'ms',
+        'hasBilibiliSession=' + hasBilibiliSession);
     reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
         reconnectAttempt++;
-        connectNative();
+        connectNative('reconnect');
     }, delay);
 }
 
@@ -182,6 +200,24 @@ function routeMessage(message, sender) {
 
     const bv = message.bv;
     const now = Date.now();
+
+    // ── Lazy connection ─────────────────────────────────────
+    // Only connect Native Host when a B站 video message actually
+    // needs forwarding.  This prevents Python from starting when
+    // the SW wakes up without any B站 page open.
+    if (!nativePort) {
+        if (!bv) return; // nothing to forward without BV
+        console.log(LOG_PREFIX,
+            '[lifecycle] connectNative 原因: 收到 B站视频消息, 惰性连接',
+            '(bv=' + bv + ')');
+        connectNative('message');
+        resetReconnectState(); // fresh user-initiated connection
+        if (!nativePort) {
+            console.warn(LOG_PREFIX, '[lifecycle] 惰性连接失败, 消息暂不发送');
+            return;
+        }
+    }
+
     const portIsFresh = nativePortJustConnected;
     nativePortJustConnected = false;
 
@@ -231,7 +267,29 @@ function routeMessage(message, sender) {
     }
 }
 
+/**
+ * Handle video_unload from content.js (pagehide event).
+ *
+ * Clears the current video session so that:
+ *   - Python renderer + queue are cleared immediately
+ *   - lastBv is reset so next B站 page triggers a fresh video_switch
+ */
+function handleVideoUnload() {
+    console.log(LOG_PREFIX, '[lifecycle] 收到 video_unload, 页面已关闭/导航离开',
+        '(lastBv:', lastBv || '(无)', ')');
+    sendToNative('video_unload', {});
+    lastBv = null;
+    persistState(null);
+}
+
 chrome.runtime.onMessage.addListener((message, sender) => {
+    // video_unload is a lifecycle signal — handle immediately, no need
+    // to wait for storageLoaded or go through routeMessage().
+    if (message && message.type === 'video_unload') {
+        handleVideoUnload();
+        return;
+    }
+
     // Queue messages until storage state is loaded (SW cold-start).
     // Once storageLoaded, routeMessage is called directly.
     if (!storageLoaded) {
@@ -245,12 +303,13 @@ chrome.runtime.onMessage.addListener((message, sender) => {
 // Lifecycle
 // ═══════════════════════════════════════════════════════════
 
-console.log(LOG_PREFIX, 'Service Worker 已启动');
+console.log(LOG_PREFIX, '[lifecycle] Service Worker 已启动, 时间:', new Date().toISOString());
 loadStoredState();
-connectNative();
+// Native Host is now connected lazily — only when a B站 video
+// message arrives in routeMessage().  This prevents Python from
+// running when no B站 page is open.
 
-// Re-connect when SW wakes up from suspend (if port is gone)
-// Note: In MV3, the SW may be terminated and restarted.
-// The top-level code runs again on restart, so connectNative() is called.
-// For mid-lifecycle wake-ups where the port was dropped, we rely on
-// onDisconnect triggering attemptReconnect().
+// When SW wakes up from suspend and the port was dropped,
+// onDisconnect triggers attemptReconnect() (limited to MAX_RECONNECT_ATTEMPTS).
+// Once the user opens a B站 video page and content.js sends a message,
+// routeMessage() lazily calls connectNative() to start a fresh Python process.

@@ -18,6 +18,7 @@ from events import (
     EventType,
     ProgressUpdatedEvent,
     VideoSwitchedEvent,
+    VideoUnloadEvent,
 )
 from data_dispatcher import DataDispatcher, dispatcher
 
@@ -30,8 +31,8 @@ from data_dispatcher import DataDispatcher, dispatcher
 class TestEventTypeEnum(unittest.TestCase):
     """EventType 枚举定义测试"""
 
-    def test_three_event_types_defined(self):
-        self.assertEqual(len(EventType), 3)
+    def test_four_event_types_defined(self):
+        self.assertEqual(len(EventType), 4)
 
     def test_video_switched_exists(self):
         self.assertIsInstance(EventType.VIDEO_SWITCHED, EventType)
@@ -41,6 +42,9 @@ class TestEventTypeEnum(unittest.TestCase):
 
     def test_progress_updated_exists(self):
         self.assertIsInstance(EventType.PROGRESS_UPDATED, EventType)
+
+    def test_video_unload_exists(self):
+        self.assertIsInstance(EventType.VIDEO_UNLOAD, EventType)
 
     def test_auto_values_are_unique(self):
         values = [e.value for e in EventType]
@@ -524,6 +528,13 @@ class TestDataDispatcherEventTypeInference(unittest.TestCase):
         self.assertEqual(
             self.d._event_type(evt),
             EventType.PROGRESS_UPDATED,
+        )
+
+    def test_video_unload_maps_correctly(self):
+        evt = VideoUnloadEvent()
+        self.assertEqual(
+            self.d._event_type(evt),
+            EventType.VIDEO_UNLOAD,
         )
 
     def test_class_name_without_event_suffix_raises(self):

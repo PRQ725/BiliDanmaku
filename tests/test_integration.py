@@ -34,7 +34,7 @@ except ImportError:
 # Always available (pure Python)
 from danmaku_parser import DanmakuItem
 from data_dispatcher import DataDispatcher
-from events import EventType, DanmakuLoadedEvent, ProgressUpdatedEvent
+from events import EventType, DanmakuLoadedEvent, ProgressUpdatedEvent, VideoUnloadEvent
 
 # PyQt-dependent imports
 if _PYQT6_AVAILABLE:
@@ -354,6 +354,138 @@ class TestDanmakuIntegration:
         integration._on_frame()
         # Even with a fake wall_clock_start, no items in queue → nothing emitted
         assert integration._renderer.active_count == 0
+
+    def test_video_unload_clears_renderer_and_queue(
+        self, integration: DanmakuIntegration, danmaku_items: list
+    ) -> None:
+        """VIDEO_UNLOAD clears renderer, queue, stops clock, and hides window.
+
+        Simulates the user closing the B站 video tab.  After video_unload:
+          - _pending_clear is set so _on_frame clears the renderer
+          - queue is emptied (total == 0, remaining == 0)
+          - wall_clock_start is None (stops tick emission)
+          - window is hidden (overlay disappears from screen)
+        """
+        # 1. Load and emit danmaku to fill renderer
+        event = DanmakuLoadedEvent(
+            bv='BVtest', cid=12345, title='Test',
+            success=True, items=danmaku_items, total=3, summary='',
+        )
+        integration._on_danmaku_loaded(event)
+        integration._wall_clock_start = time.monotonic() - 10.0
+        integration._on_frame()
+        assert integration._renderer.active_count == 3
+        assert integration._queue.total > 0
+        assert integration._wall_clock_start is not None
+        # Window is shown when video is active
+        assert integration._window.isVisible() is True
+
+        # 2. Video unload (tab close / navigation away)
+        integration._on_video_unload(VideoUnloadEvent())
+
+        # 3. State cleared in background thread
+        assert integration._pending_clear is True
+        assert integration._queue.total == 0
+        assert integration._queue.remaining == 0
+        assert integration._wall_clock_start is None
+
+        # 4. _on_frame clears renderer + hides window (GUI thread)
+        integration._on_frame()
+        assert integration._renderer.active_count == 0
+        assert integration._pending_clear is False
+        assert integration._window.isVisible() is False
+
+    def test_video_unload_window_hide_show_cycle(
+        self, integration: DanmakuIntegration, danmaku_items: list
+    ) -> None:
+        """Window hides on video_unload and shows again on next video_switch.
+
+        Full cycle: video_switch → window visible → video_unload → hidden
+        → new video_switch → visible again.
+        """
+        # 1. First video → window shown
+        e1 = DanmakuLoadedEvent(
+            bv='BV1', cid=111, title='First',
+            success=True, items=danmaku_items, total=3, summary='',
+        )
+        integration._on_danmaku_loaded(e1)
+        integration._wall_clock_start = time.monotonic() - 10.0
+        integration._on_frame()
+        assert integration._window.isVisible() is True
+        assert integration._renderer.active_count == 3
+
+        # 2. Video unload → window hidden
+        integration._on_video_unload(VideoUnloadEvent())
+        integration._on_frame()
+        assert integration._window.isVisible() is False
+        assert integration._renderer.active_count == 0
+
+        # 3. New video → window shown again
+        e2 = DanmakuLoadedEvent(
+            bv='BV2', cid=222, title='Second',
+            success=True, items=danmaku_items, total=3, summary='',
+        )
+        integration._on_danmaku_loaded(e2)
+        integration._wall_clock_start = time.monotonic() - 10.0
+        integration._on_frame()
+        assert integration._window.isVisible() is True
+        assert integration._renderer.active_count == 3
+
+    def test_video_unload_before_any_load(
+        self, integration: DanmakuIntegration
+    ) -> None:
+        """VIDEO_UNLOAD is safe even before any danmaku was loaded (no-op)."""
+        # Should not raise — all operations are idempotent
+        integration._on_video_unload(VideoUnloadEvent())
+        assert integration._pending_clear is True
+        assert integration._queue.total == 0
+        assert integration._wall_clock_start is None
+
+        # _on_frame should clear and reset
+        integration._on_frame()
+        assert integration._renderer.active_count == 0
+        assert integration._pending_clear is False
+
+    def test_video_unload_after_multiple_loads(
+        self, integration: DanmakuIntegration, danmaku_items: list
+    ) -> None:
+        """VIDEO_UNLOAD works correctly after multiple video switches."""
+        # First video
+        e1 = DanmakuLoadedEvent(
+            bv='BV1', cid=111, title='First',
+            success=True, items=danmaku_items, total=3, summary='',
+        )
+        integration._on_danmaku_loaded(e1)
+        integration._wall_clock_start = time.monotonic() - 10.0
+        integration._on_frame()
+        assert integration._renderer.active_count == 3
+
+        # Switch to second video
+        items2 = [_dm(content='新弹幕', time_sec=0.5, danmaku_id=99)]
+        e2 = DanmakuLoadedEvent(
+            bv='BV2', cid=222, title='Second',
+            success=True, items=items2, total=1, summary='',
+        )
+        integration._on_danmaku_loaded(e2)
+        integration._wall_clock_start = time.monotonic() - 10.0
+        integration._on_frame()
+        assert integration._renderer.active_count == 1
+
+        # Unload
+        integration._on_video_unload(VideoUnloadEvent())
+        integration._on_frame()
+        assert integration._renderer.active_count == 0
+        assert integration._queue.total == 0
+        assert integration._wall_clock_start is None
+
+    def test_video_unload_subscribed(
+        self, integration: DanmakuIntegration
+    ) -> None:
+        """VIDEO_UNLOAD event type is subscribed in the dispatcher."""
+        import native_host
+        used = native_host.dispatcher
+        count = used.subscriber_count(EventType.VIDEO_UNLOAD)
+        assert count >= 1
 
     def test_quit_requested_signal_exists(
         self, integration: DanmakuIntegration

@@ -36,6 +36,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import List, Callable, Optional
@@ -108,6 +109,7 @@ class DanmakuRenderer(QObject):
     TRACK_PADDING = 8           # 轨道间距 (px)
     TRACK_GAP = 80              # 同轨道相邻弹幕最小间距 (px)
     FRAME_INTERVAL = 33         # 帧间隔 ms (~30fps)
+    HEARTBEAT_INTERVAL = 30.0   # 心跳日志间隔 (秒)
     TEXT_COLOR = QColor(255, 255, 255)
     OUTLINE_COLOR = QColor(0, 0, 0)
 
@@ -147,6 +149,10 @@ class DanmakuRenderer(QObject):
         self._last_frame_time: float = 0.0
         self._running: bool = False
 
+        # ── 诊断计数器 ────────────────────────────────────────
+        self._frame_count: int = 0
+        self._last_heartbeat_time: float = 0.0
+
         # ── 文字宽度测量函数 (可注入, 便于测试) ────────────────
         self._measure_func: Optional[Callable[[str], float]] = None
 
@@ -170,6 +176,7 @@ class DanmakuRenderer(QObject):
         调用前应确保已通过 set_render_area() 设置渲染区域。
         """
         self._last_frame_time = time.monotonic()
+        self._last_heartbeat_time = self._last_frame_time
         self._running = True
         self._timer.start(self.FRAME_INTERVAL)
 
@@ -250,6 +257,11 @@ class DanmakuRenderer(QObject):
         """帧渲染是否正在运行。"""
         return self._running
 
+    @property
+    def frame_count(self) -> int:
+        """自 start() 以来的累计帧数（诊断用）。"""
+        return self._frame_count
+
     # ── 帧驱动 ─────────────────────────────────────────────────
 
     def _on_frame(self) -> None:
@@ -258,20 +270,45 @@ class DanmakuRenderer(QObject):
         1. 计算帧间时差
         2. 更新所有活跃弹幕位置
         3. 移除越界弹幕
-        4. 发射 frame_rendered 信号
+        4. 诊断心跳日志（每 HEARTBEAT_INTERVAL 秒）
+        5. 发射 frame_rendered 信号
         """
-        now = time.monotonic()
-        delta = now - self._last_frame_time
-        self._last_frame_time = now
+        try:
+            now = time.monotonic()
+            delta = now - self._last_frame_time
+            self._last_frame_time = now
 
-        # 防止异常大的 delta（如系统休眠后恢复）
-        if delta > 1.0:
-            delta = self.FRAME_INTERVAL / 1000.0
+            # 防止异常大的 delta（如系统休眠后恢复）
+            if delta > 1.0:
+                delta = self.FRAME_INTERVAL / 1000.0
 
-        self._update_positions(delta)
-        self._remove_out_of_bounds()
+            self._update_positions(delta)
+            self._remove_out_of_bounds()
 
-        self.frame_rendered.emit()
+            self._frame_count += 1
+
+            # 诊断心跳：每 HEARTBEAT_INTERVAL 秒输出一次状态
+            if now - self._last_heartbeat_time >= self.HEARTBEAT_INTERVAL:
+                self._last_heartbeat_time = now
+                print(
+                    f'[BiliDanmaku] [renderer heartbeat] '
+                    f'frame=#{self._frame_count} '
+                    f'active={self.active_count} '
+                    f'running={self._running} '
+                    f'delta={delta:.3f}s',
+                    file=sys.stderr,
+                )
+
+            self.frame_rendered.emit()
+
+        except Exception:
+            import traceback
+            print(
+                f'[BiliDanmaku] [renderer] _on_frame 异常 (frame=#{self._frame_count}):',
+                file=sys.stderr,
+            )
+            traceback.print_exc(file=sys.stderr)
+            # 不重新抛出 — 防止单帧异常导致 QTimer 停止
 
     # ── 弹幕生命周期 ───────────────────────────────────────────
 
